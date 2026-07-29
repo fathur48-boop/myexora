@@ -19,7 +19,7 @@
 import { safeFetchJson } from '../utils'
 
 async function call(action: string, token: string | null, ...args: any[]) {
-  const res = await fetch('/api/admin', {
+  const res = await fetch('/api/toko', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action, token: token ?? null, args }),
