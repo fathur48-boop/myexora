@@ -4,6 +4,7 @@
 // ================================================
 
 import { createClient } from '@supabase/supabase-js'
+import crypto from 'crypto'
 
 const supabaseAdmin = createClient(
   process.env.SUPABASE_URL || 'https://placeholder.supabase.co',
@@ -100,6 +101,7 @@ export default async function handler(req, res) {
         payment_id: paymentId,
         user_id: userId,
         target_plan: planKey,
+        duration_months: Number(durationMonths),
         amount: grossAmount,
         status: 'pending',
         snap_token: snapToken,
@@ -136,6 +138,76 @@ export default async function handler(req, res) {
           planExpiry: record.plan_expiry || null,
         }
       })
+    }
+
+    // ================================================
+    // WEBHOOK — dipanggil Midtrans otomatis tiap ada perubahan status
+    // transaksi. Ini yang tadinya HILANG, jadi status pembayaran &
+    // plan_expiry gak pernah keupdate otomatis dari sisi Midtrans.
+    // ================================================
+    if (action === 'notification' || req.body?.order_id) {
+      const body = req.body || {}
+      const { order_id, status_code, gross_amount, signature_key, transaction_status, fraud_status } = body
+
+      if (!order_id || !status_code || !gross_amount || !signature_key) {
+        return res.status(400).json({ success: false, message: 'Payload notifikasi tidak lengkap' })
+      }
+
+      // Verifikasi signature supaya notifikasi beneran dari Midtrans,
+      // bukan orang iseng nembak endpoint ini manual.
+      const expectedSignature = crypto
+        .createHash('sha512')
+        .update(order_id + status_code + gross_amount + MIDTRANS_SERVER_KEY)
+        .digest('hex')
+
+      if (expectedSignature !== signature_key) {
+        return res.status(403).json({ success: false, message: 'Signature tidak valid' })
+      }
+
+      const { data: record } = await supabaseAdmin
+        .from('upgrade_payments')
+        .select('*')
+        .eq('payment_id', order_id)
+        .single()
+
+      if (!record) return res.status(404).json({ success: false, message: 'Payment record not found' })
+
+      let newStatus = record.status
+      if (transaction_status === 'capture' || transaction_status === 'settlement') {
+        newStatus = (fraud_status && fraud_status !== 'accept') ? 'failed' : 'success'
+      } else if (transaction_status === 'pending') {
+        newStatus = 'pending'
+      } else if (['deny', 'cancel', 'expire', 'failure'].includes(transaction_status)) {
+        newStatus = 'failed'
+      }
+
+      let planExpiryIso = record.plan_expiry || null
+
+      if (newStatus === 'success' && record.status !== 'success') {
+        const months = Number(record.duration_months || 1)
+        const expiry = new Date()
+        expiry.setMonth(expiry.getMonth() + months)
+        planExpiryIso = expiry.toISOString()
+
+        // Sinkron ke users & toko — bukan cuma catat status di upgrade_payments
+        await supabaseAdmin
+          .from('users')
+          .update({ plan: record.target_plan, plan_expiry: planExpiryIso, updated_at: new Date().toISOString() })
+          .eq('id', record.user_id)
+
+        await supabaseAdmin
+          .from('toko')
+          .update({ plan: record.target_plan, updated_at: new Date().toISOString() })
+          .eq('user_id', record.user_id)
+      }
+
+      const { error: updateErr } = await supabaseAdmin
+        .from('upgrade_payments')
+        .update({ status: newStatus, plan_expiry: planExpiryIso, updated_at: new Date().toISOString() })
+        .eq('payment_id', order_id)
+      if (updateErr) console.error('Gagal update upgrade_payments:', updateErr.message)
+
+      return res.status(200).json({ success: true })
     }
 
     return res.status(400).json({ success: false, message: 'Action tidak dikenal' })
