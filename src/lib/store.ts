@@ -52,6 +52,27 @@ export const useAuthStore = create<AuthState>((set) => ({
     set({ user, token, isAuthenticated: !!(user || token) })
   },
   loginWithGoogle: async (payload) => {
+    try {
+      const res = await authApi.loginWithGoogle({
+        email: payload.email,
+        name: payload.name,
+        picture: payload.picture,
+        sub: payload.sub || 'google_' + Date.now(),
+        agreedToTerms: payload.agreedToTerms !== false,
+      })
+      if (res?.data?.token && res?.data?.user) {
+        const user = res.data.user
+        const token = res.data.token
+        localStorage.setItem('exora_user', JSON.stringify(user))
+        localStorage.setItem('exora_token', token)
+        set({ user, token, isAuthenticated: true })
+        return
+      }
+    } catch (e) {
+      console.warn('Backend loginWithGoogle fallback:', e)
+    }
+
+    // Fallback if backend API offline
     const user = {
       id: payload.sub || 'usr_' + Date.now(),
       email: payload.email,
@@ -75,6 +96,9 @@ export const useAuthStore = create<AuthState>((set) => ({
   logout: () => {
     localStorage.removeItem('exora_user')
     localStorage.removeItem('exora_token')
+    localStorage.removeItem('exora_toko')
+    localStorage.removeItem('exora_customer_user')
+    localStorage.removeItem('exora_customer_token')
     set({ user: null, token: null, isAuthenticated: false })
   }
 }))
