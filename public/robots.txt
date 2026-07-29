@@ -1,0 +1,13 @@
+User-agent: *
+Allow: /
+Disallow: /dashboard
+Disallow: /admin
+Disallow: /login
+Disallow: /invoice
+Disallow: /r/
+Disallow: /api/
+Allow: /api/blog
+Allow: /api/admin
+Allow: /api/guides
+Allow: /api/help
+Sitemap: https://myexora.com/sitemap.xml

@@ -1,0 +1,443 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-display: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+
+    --bg-primary: #08080a;
+    --bg-secondary: #0f0f13;
+    --bg-card: #14141a;
+    --bg-surface: #1a1a22;
+    --surface-active: #22222c;
+    --glass-border: rgba(255, 255, 255, 0.08);
+    --border-card: rgba(255, 255, 255, 0.12);
+
+    --text-primary: #f4f4f6;
+    --text-secondary: #a1a1aa;
+    --text-tertiary: #71717a;
+    --text-muted: #52525b;
+
+    --accent: #3b82f6;
+    --accent-2: #2563eb;
+    --accent-3: #1d4ed8;
+    --accent-gradient: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+    --accent-gradient-soft: rgba(59, 130, 246, 0.12);
+
+    --success: #10B981;
+    --success-bg: rgba(16, 185, 129, 0.12);
+    --warning: #F59E0B;
+    --warning-bg: rgba(245, 158, 11, 0.12);
+    --danger: #EF4444;
+    --danger-bg: rgba(239, 68, 68, 0.12);
+
+    --radius-sm: 6px;
+    --radius-md: 10px;
+    --radius-lg: 14px;
+    --radius-xl: 18px;
+    --radius-2xl: 24px;
+    --radius-full: 9999px;
+
+    --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.2);
+    --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.3);
+    --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.4);
+    --shadow-card: 0 4px 20px rgba(0, 0, 0, 0.25);
+
+    --transition-fast: 0.15s ease;
+    --transition-normal: 0.25s ease;
+  }
+
+  [data-theme="light"] {
+    --bg-primary: #ffffff;
+    --bg-secondary: #f7f7f8;
+    --bg-card: #ffffff;
+    --bg-surface: #f0f0f3;
+    --surface-active: #e4e4e9;
+    --glass-border: #e2e2e7;
+    --border-card: #d1d1d8;
+
+    --text-primary: #1a1a1f;
+    --text-secondary: #4a4a52;
+    --text-tertiary: #7a7a85;
+    --text-muted: #9a9a9a;
+
+    --accent: #185FA5;
+    --accent-gradient-soft: rgba(24, 95, 165, 0.08);
+
+    --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.05);
+    --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.08);
+    --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.12);
+    --shadow-card: 0 2px 12px rgba(0, 0, 0, 0.06);
+  }
+
+  body {
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+    margin: 0;
+    padding: 0;
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+.glass-card {
+  background: var(--bg-card);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-card);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border-radius: var(--radius-full);
+  font-family: var(--font-sans);
+  font-size: 0.875rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  text-decoration: none;
+}
+
+.btn-primary {
+  background: var(--accent-gradient);
+  color: #ffffff;
+  border: none;
+}
+
+.btn-secondary {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 1px solid var(--glass-border);
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-secondary);
+  border: none;
+}
+
+.btn-sm {
+  padding: 6px 14px;
+  font-size: 0.8rem;
+}
+
+.btn-lg {
+  padding: 14px 28px;
+  font-size: 1rem;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.form-label {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.form-input {
+  width: 100%;
+  padding: 10px 14px;
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  border: 1px solid var(--glass-border);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 0.875rem;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.form-input:focus {
+  border-color: var(--accent);
+}
+
+.form-textarea {
+  resize: vertical;
+}
+
+.form-hint {
+  font-size: 0.75rem;
+  color: var(--text-tertiary);
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: var(--radius-full);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.badge-free {
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+}
+
+.badge-starter {
+  background: rgba(59, 130, 246, 0.15);
+  color: #3b82f6;
+}
+
+.badge-pro {
+  background: rgba(251, 191, 36, 0.15);
+  color: #fbbf24;
+}
+
+.badge-business {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+}
+
+.badge-danger {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.spinner {
+  border: 2px solid var(--glass-border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.container {
+  width: 100%;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 20px;
+  box-sizing: border-box;
+}
+
+.container-sm {
+  width: 100%;
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 0 20px;
+  box-sizing: border-box;
+}
+
+/* Hide scrollbar for Chrome, Safari and Opera */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+/* Hide scrollbar for IE, Edge and Firefox */
+.no-scrollbar {
+  -ms-overflow-style: none;  /* IE and Edge */
+  scrollbar-width: none;  /* Firefox */
+}
+
+/* Responsive Table Wrapper */
+.table-responsive {
+  width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  margin-bottom: 1rem;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+/* Mobile responsive styles */
+@media (max-width: 768px) {
+  .container, .container-sm {
+    padding: 0 14px;
+  }
+
+  /* Prevent auto-zoom on iOS inputs */
+  input[type="text"],
+  input[type="number"],
+  input[type="email"],
+  input[type="password"],
+  input[type="search"],
+  input[type="tel"],
+  select,
+  textarea,
+  .form-input {
+    font-size: 16px !important;
+  }
+
+  /* Touch-friendly buttons on mobile */
+  .btn {
+    min-height: 42px;
+    padding: 8px 16px;
+  }
+
+  /* Modals on mobile */
+  .modal-dialog, .modal-content {
+    max-width: 100% !important;
+    width: 95% !important;
+    margin: 10px auto !important;
+    padding: 16px !important;
+    max-height: 90vh !important;
+    overflow-y: auto !important;
+    border-radius: 16px !important;
+  }
+
+  /* Responsive Grid utility classes */
+  .grid-mobile-1 {
+    grid-template-columns: 1fr !important;
+  }
+  
+  .grid-mobile-2 {
+    grid-template-columns: repeat(2, 1fr) !important;
+  }
+
+  /* Flex wrap defaults */
+  .flex-mobile-col {
+    flex-direction: column !important;
+    align-items: stretch !important;
+  }
+
+  /* Full width action buttons on mobile */
+  .btn-mobile-full {
+    width: 100% !important;
+    justify-content: center !important;
+  }
+
+  /* Universal image & video responsive scaling */
+  img, video, canvas, iframe {
+    max-width: 100%;
+    height: auto;
+  }
+
+  /* Prevent text overflow safely on mobile without breaking short words mid-character */
+  p, div, span {
+    overflow-wrap: break-word;
+    word-break: normal;
+  }
+
+  h1, h2, h3, h4, h5, h6, .brand-text, .btn, .badge {
+    word-break: normal !important;
+    overflow-wrap: normal !important;
+  }
+
+  /* Native Mobile App Typography & Component Compacting Scaling */
+  html {
+    font-size: 13px !important;
+  }
+
+  body {
+    font-size: 12px !important;
+    line-height: 1.4 !important;
+  }
+
+  p, span, li, a, label, div, td, th {
+    font-size: 0.78rem;
+  }
+
+  h1 {
+    font-size: clamp(1.25rem, 4.5vw, 1.6rem) !important;
+    line-height: 1.15 !important;
+    letter-spacing: -0.01em !important;
+  }
+
+  h2 {
+    font-size: clamp(1.05rem, 3.5vw, 1.3rem) !important;
+    line-height: 1.2 !important;
+  }
+
+  h3 {
+    font-size: clamp(0.92rem, 3vw, 1.1rem) !important;
+    line-height: 1.25 !important;
+  }
+
+  h4 {
+    font-size: 0.82rem !important;
+    line-height: 1.25 !important;
+  }
+
+  h5, h6 {
+    font-size: 0.76rem !important;
+  }
+
+  /* Compact Cards & Containers on Mobile */
+  .card, .glass-card, .bento-card, .stat-card, [class*="card"] {
+    padding: 10px 12px !important;
+    border-radius: 12px !important;
+  }
+
+  .container, .container-sm {
+    padding: 0 10px !important;
+  }
+
+  /* Compact Buttons & Inputs on Mobile */
+  .btn {
+    min-height: 32px !important;
+    height: auto !important;
+    padding: 5px 10px !important;
+    font-size: 0.75rem !important;
+    border-radius: 8px !important;
+  }
+
+  .btn-lg {
+    padding: 8px 14px !important;
+    font-size: 0.82rem !important;
+    min-height: 38px !important;
+  }
+
+  .btn-sm, .btn-xs {
+    padding: 4px 8px !important;
+    font-size: 0.72rem !important;
+    min-height: 28px !important;
+  }
+
+  .form-input, select, textarea, input {
+    font-size: 14px !important; /* Prevents iOS auto-zoom while remaining compact */
+    padding: 6px 10px !important;
+    border-radius: 8px !important;
+  }
+
+  /* Raised Floating WA Button on mobile */
+  .floating-wa-btn {
+    bottom: 85px !important;
+    right: 14px !important;
+    width: 44px !important;
+    height: 44px !important;
+  }
+
+  /* Super Compact Footer Styling */
+  footer.main-footer, footer {
+    padding-top: 20px !important;
+    padding-bottom: 16px !important;
+  }
+
+  footer h4 {
+    font-size: 0.8rem !important;
+    margin-bottom: 6px !important;
+  }
+
+  footer a, footer p, footer span {
+    font-size: 0.72rem !important;
+    line-height: 1.35 !important;
+  }
+
+  /* Stack header/navbar buttons nicely if needed */
+  header, nav, .navbar {
+    box-sizing: border-box;
+  }
+
+  /* Make sure sticky bottom bars have safe area padding for modern mobile browsers */
+  .sticky-bottom-mobile {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 99;
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
+  }
+}

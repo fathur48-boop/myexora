@@ -1,0 +1,44 @@
+{
+  "redirects": [
+    { "source": "/toko/:slug", "destination": "/:slug", "permanent": true }
+  ],
+  "rewrites": [
+    { "source": "/sitemap.xml", "destination": "/api/sitemap" },
+
+    { "source": "/blog",
+      "has": [{ "type": "header", "key": "user-agent", "value": ".*(facebookexternalhit|WhatsApp|Twitterbot|LinkedInBot|TelegramBot|Slackbot|Discordbot|Applebot|Googlebot|Bingbot|ia_archiver).*" }],
+      "destination": "/api/render?type=blog" },
+    { "source": "/blog/:slug",
+      "has": [{ "type": "header", "key": "user-agent", "value": ".*(facebookexternalhit|WhatsApp|Twitterbot|LinkedInBot|TelegramBot|Slackbot|Discordbot|Applebot|Googlebot|Bingbot|ia_archiver).*" }],
+      "destination": "/api/render?type=blog&slug=:slug" },
+
+    { "source": "/guides",
+      "has": [{ "type": "header", "key": "user-agent", "value": ".*(facebookexternalhit|WhatsApp|Twitterbot|LinkedInBot|TelegramBot|Slackbot|Discordbot|Applebot|Googlebot|Bingbot|ia_archiver).*" }],
+      "destination": "/api/render?type=guides" },
+    { "source": "/guides/:slug",
+      "has": [{ "type": "header", "key": "user-agent", "value": ".*(facebookexternalhit|WhatsApp|Twitterbot|LinkedInBot|TelegramBot|Slackbot|Discordbot|Applebot|Googlebot|Bingbot|ia_archiver).*" }],
+      "destination": "/api/render?type=guides&slug=:slug" },
+
+    { "source": "/help",
+      "has": [{ "type": "header", "key": "user-agent", "value": ".*(facebookexternalhit|WhatsApp|Twitterbot|LinkedInBot|TelegramBot|Slackbot|Discordbot|Applebot|Googlebot|Bingbot|ia_archiver).*" }],
+      "destination": "/api/render?type=help" },
+    { "source": "/help/:slug",
+      "has": [{ "type": "header", "key": "user-agent", "value": ".*(facebookexternalhit|WhatsApp|Twitterbot|LinkedInBot|TelegramBot|Slackbot|Discordbot|Applebot|Googlebot|Bingbot|ia_archiver).*" }],
+      "destination": "/api/render?type=help&slug=:slug" },
+
+    { "source": "/:slug((?!blog|guides|help|api/|assets/|.*\\.).*)",
+      "has": [{ "type": "header", "key": "user-agent", "value": ".*(facebookexternalhit|WhatsApp|Twitterbot|LinkedInBot|TelegramBot|Slackbot|Discordbot|Applebot|Googlebot|Bingbot|ia_archiver).*" }],
+      "destination": "/api/og?slug=:slug" },
+
+    { "source": "/((?!api/).*)", "destination": "/index.html" }
+  ],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "Cross-Origin-Opener-Policy", "value": "same-origin-allow-popups" },
+        { "key": "Cross-Origin-Embedder-Policy", "value": "credentialless" }
+      ]
+    }
+  ]
+}

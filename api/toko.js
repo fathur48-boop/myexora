@@ -1,0 +1,2051 @@
+// ================================================
+// /api/admin.js — SERVERLESS FUNCTION (jalan di server, BUKAN di browser)
+//
+// REVISI PADA VERSI INI (dari revisi sebelumnya):
+// 1. BARU: verifyAdminToken() — cek users.is_admin sebelum izinkan akses
+//    ke adminApi.* dan tokoApi.confirmUpgrade. Sebelumnya method-method
+//    ini cuma verifyToken() biasa (token valid = lolos), jadi SIAPAPUN
+//    user yang login bisa grant plan, hapus user, dsb. Sekarang wajib
+//    is_admin = true di tabel users.
+// 2. tokoApi.confirmUpgrade sekarang menerima & memakai targetPlan dari
+//    parameter (dulu di-hardcode 'pro', jadi upgrade ke Business dari
+//    admin panel diam-diam jadi Pro).
+// 3. pesananApi.create sekarang mengambil ulang produk.harga dari DB
+//    berdasarkan produkId, TIDAK percaya harga/total kiriman client.
+//    Kalau produkId ada tapi produk tidak ditemukan/tidak aktif, order
+//    ditolak. Kalau produkId kosong (custom/manual order), harga dari
+//    client masih dipakai apa adanya (belum ada validasi lebih lanjut
+//    untuk kasus ini).
+// 4. BARU: customerApi (buyer per-toko) — login Google customer,
+//    terpisah total dari authApi (seller). Token customer divalidasi
+//    lewat verifyCustomerToken(), bukan verifyToken(), supaya token
+//    buyer dan token seller tidak pernah bisa tertukar / saling lolos.
+//    pesananApi.create sekarang juga menyimpan customer_id (opsional,
+//    null kalau guest checkout).
+// 5. BARU: streamApi — fitur Stream (post/reply/like/repost/bookmark/
+//    DM/upload foto) dibuka untuk SEMUA plan termasuk free, bukan cuma
+//    starter ke atas. requireStarter() dilepas dari 8 method di bawah
+//    ini supaya komunitas seller kebentuk sejak awal launch, bukan
+//    cuma buat user berbayar. Limit lain (mis. jumlah foto per post)
+//    tetap jalan lewat MAX_PHOTOS di frontend.
+// ================================================
+
+import { createClient } from '@supabase/supabase-js'
+import { AccessToken } from 'livekit-server-sdk'
+
+if (!process.env.SUPABASE_URL || (!process.env.SUPABASE_SECRET_KEY && !process.env.SUPABASE_SERVICE_ROLE_KEY)) {
+  console.error('ENV MISSING: SUPABASE_URL atau SERVICE_ROLE_KEY belum diset!')
+}
+
+const supabaseAdmin = createClient(
+  process.env.SUPABASE_URL || 'https://placeholder.supabase.co',
+  process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || 'placeholder',
+  {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+    }
+  }
+)
+
+const supabasePublic = createClient(
+  process.env.SUPABASE_URL || 'https://placeholder.supabase.co',
+  process.env.SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_SECRET_KEY || 'placeholder'
+)
+
+// ================================================
+// HELPERS
+// ================================================
+
+class ApiError extends Error {
+  constructor(message, status) {
+    super(message)
+    this.status = status
+  }
+}
+
+function handleError(error) {
+  throw new ApiError(error.message || 'Terjadi kesalahan', 400)
+}
+
+// ================================================
+// TIER VALIDATION HELPERS (4-TIER SYSTEM)
+// ================================================
+
+const TIER_LEVELS = { free: 0, starter: 1, pro: 2, business: 3 }
+
+function requireMinTier(userRow, minTierName) {
+  const userTier = TIER_LEVELS[userRow?.plan?.toLowerCase()] || 0
+  const requiredTier = TIER_LEVELS[minTierName.toLowerCase()] || 0
+
+  if (userTier < requiredTier) {
+    throw new ApiError(`Fitur ini minimal untuk plan ${minTierName}`, 403)
+  }
+
+  if (userTier > 0) {
+    const expiry = userRow?.plan_expiry
+    if (!expiry || new Date(expiry) < new Date()) {
+      throw new ApiError('Plan kamu sudah kedaluwarsa, silakan perpanjang', 403)
+    }
+  }
+}
+
+function requireStarter(userRow) {
+  requireMinTier(userRow, 'starter')
+}
+
+function requirePro(userRow) {
+  requireMinTier(userRow, 'pro')
+}
+
+// ================================================
+// TERMS ACCEPTANCE HELPER
+// ================================================
+
+function hasAcceptedTerms(userRow) {
+  return !!userRow?.terms_accepted_at
+}
+
+function requireTermsAccepted(userRow) {
+  if (!hasAcceptedTerms(userRow)) {
+    throw new ApiError('Anda harus menyetujui Syarat Layanan dan Kebijakan Privasi untuk melanjutkan', 403)
+  }
+}
+
+// ================================================
+// FOTO LIMIT HELPER (SATPAM FOTO)
+// ================================================
+
+function getFotoLimit(plan) {
+  const userPlan = (plan || 'free').toLowerCase()
+  if (userPlan === 'pro' || userPlan === 'business') return -1
+  if (userPlan === 'starter') return 5
+  return 2
+}
+
+function validateFotoLimit(fotoData, maxFoto) {
+  if (maxFoto === -1) return
+
+  let fotoArray = []
+  if (typeof fotoData === 'string') {
+    try {
+      fotoArray = JSON.parse(fotoData)
+    } catch {
+      fotoArray = []
+    }
+  } else if (Array.isArray(fotoData)) {
+    fotoArray = fotoData
+  }
+
+  if (fotoArray.length > maxFoto) {
+    throw new ApiError(`Maksimal ${maxFoto} foto per produk untuk plan kamu`, 403)
+  }
+}
+
+function extractHashtags(text) {
+  const matches = String(text || '').match(/#\w+/g) || []
+  return [...new Set(matches)]
+}
+
+// ================================================
+// ORDER ID GENERATOR
+// ================================================
+
+async function generateOrderId() {
+  const today = new Date()
+  const dateStr = today.toISOString().slice(0, 10).replace(/-/g, '')
+
+  let sequence = 1
+  let attempts = 0
+  const maxAttempts = 3
+
+  while (attempts < maxAttempts) {
+    const { data: todayOrders, error } = await supabaseAdmin
+      .from('pesanan')
+      .select('order_id')
+      .like('order_id', `EXR-${dateStr}-%`)
+      .order('order_id', { ascending: false })
+      .limit(1)
+
+    if (error) {
+      console.error('generateOrderId error:', error)
+      break
+    }
+
+    if (todayOrders && todayOrders.length > 0) {
+      const lastOrderId = todayOrders[0].order_id
+      const lastSequence = parseInt(lastOrderId.split('-')[2])
+      sequence = lastSequence + 1
+    } else {
+      sequence = 1
+    }
+
+    const orderId = `EXR-${dateStr}-${String(sequence).padStart(3, '0')}`
+
+    const { data: existing } = await supabaseAdmin
+      .from('pesanan')
+      .select('id')
+      .eq('order_id', orderId)
+    .maybeSingle()
+
+    if (!existing) {
+      return orderId
+    }
+
+    attempts++
+  }
+
+  const fallbackSequence = String(Date.now() % 1000).padStart(3, '0')
+  return `EXR-${dateStr}-${fallbackSequence}`
+}
+
+async function verifyToken(token) {
+  if (!token) throw new ApiError('Token diperlukan', 401)
+
+  const { data, error } = await supabaseAdmin
+    .from('tokens')
+    .select('*')
+    .eq('token', token)
+    .single()
+
+  if (error || !data) throw new ApiError('Token tidak valid', 401)
+  if (new Date(data.expires_at) < new Date()) throw new ApiError('Token kadaluarsa, silakan login ulang', 401)
+
+  return data.user_id
+}
+
+// ================================================
+// BARU: ADMIN VERIFICATION
+// Wajib dipakai untuk semua action yang hanya boleh diakses admin
+// (adminApi.*, tokoApi.confirmUpgrade). Cek kolom users.is_admin.
+// ================================================
+
+async function verifyAdminToken(token) {
+  const userId = await verifyToken(token)
+
+  const { data: userRow, error } = await supabaseAdmin
+    .from('users')
+    .select('is_admin')
+    .eq('id', userId)
+    .single()
+
+  if (error) handleError(error)
+  if (!userRow?.is_admin) {
+    throw new ApiError('Akses ditolak — halaman ini khusus admin', 403)
+  }
+
+  return userId
+}
+
+// ================================================
+// BARU: CUSTOMER TOKEN VERIFICATION
+// Terpisah total dari verifyToken() seller — supaya token buyer
+// dan token seller tidak pernah bisa tertukar / saling lolos.
+// ================================================
+async function verifyCustomerToken(token) {
+  if (!token) throw new ApiError('Token diperlukan', 401)
+  const { data, error } = await supabaseAdmin
+    .from('customer_tokens')
+    .select('*')
+    .eq('token', token)
+    .single()
+  if (error || !data) throw new ApiError('Token tidak valid', 401)
+  if (new Date(data.expires_at) < new Date()) throw new ApiError('Sesi kadaluarsa, silakan login ulang', 401)
+  return data.customer_id
+}
+
+// ================================================
+// MAPPERS — snake_case DB → camelCase frontend
+// ================================================
+
+function mapProduk(p) {
+  if (!p) return null
+  return {
+    id: p.id, tokoId: p.toko_id, userId: p.user_id, nama: p.nama,
+    deskripsi: p.deskripsi, harga: p.harga, hargaCoret: p.harga_coret,
+    hpp: p.hpp ?? null,
+    stok: p.stok, kategori: p.kategori, berat: p.berat, foto: p.foto,
+    aktif: p.aktif,
+    isPreorder: p.is_preorder || false,
+    preorderReadyDate: p.preorder_ready_date || null,
+    hargaFlash: p.harga_flash || null,
+    flashSaleUntil: p.flash_sale_until || null,
+    createdAt: p.created_at, updatedAt: p.updated_at,
+  }
+}
+
+function mapToko(t) {
+  if (!t) return null
+  return {
+    id: t.id, userId: t.user_id, nama: t.nama, slug: t.slug,
+    deskripsi: t.deskripsi, wa: t.wa, logo: t.logo, tema: t.tema,
+    layoutTemplate: t.layout_template || 'classic', // BARU
+    plan: t.plan, aktif: t.aktif, pengumuman: t.pengumuman, musik: t.musik,
+    video: t.video, customDomain: t.custom_domain,
+    customDomainStatus: t.custom_domain_status || null,
+    paymentMethodsEnabled: t.payment_methods_enabled || ['manual'],
+    originAreaId: t.origin_area_id || null,
+    originAreaLabel: t.origin_area_label || null,
+    createdAt: t.created_at, updatedAt: t.updated_at,
+  }
+}
+
+function mapUser(u) {
+  if (!u) return null
+  return {
+    id: u.id, email: u.email, name: u.name, picture: u.picture,
+    googleId: u.google_id, plan: u.plan || 'free', planExpiry: u.plan_expiry,
+    termsAcceptedAt: u.terms_accepted_at || null,
+    termsVersion: u.terms_version || null,
+    isAdmin: u.is_admin || false,
+    createdAt: u.created_at, updatedAt: u.updated_at,
+  }
+}
+
+// BARU: mapper customer (buyer per-toko)
+function mapCustomer(c) {
+  if (!c) return null
+  return {
+    id: c.id,
+    tokoId: c.toko_id,
+    email: c.email,
+    name: c.name,
+    picture: c.picture,
+    wa: c.wa || null,
+    createdAt: c.created_at,
+  }
+}
+
+function mapPesanan(p) {
+  if (!p) return null
+  return {
+    id: p.id, orderId: p.order_id, tokoId: p.toko_id, tokoSlug: p.toko?.slug || null,
+    toko: p.toko ? { id: p.toko.id, nama: p.toko.nama, slug: p.toko.slug, logo: p.toko.logo, wa: p.toko.wa } : null,
+    produkId: p.produk_id, produkNama: p.produk_nama, harga: p.harga,
+    hpp: p.hpp ?? null,
+    qty: p.qty, total: p.total, buyerNama: p.buyer_nama, buyerWa: p.buyer_wa,
+    buyerAlamat: p.buyer_alamat, catatan: p.catatan, status: p.status,
+    kurir: p.kurir, resi: p.resi, createdAt: p.created_at, updatedAt: p.updated_at,
+    doneAt: p.done_at || null,
+    paymentMethodUsed: p.payment_method_used || 'manual',
+    ongkirAmount: p.ongkir_amount || 0,
+    kurirEstimasi: p.kurir_estimasi || null,
+    payoutStatus: p.payout_status || 'not_applicable',
+    payoutReleaseAt: p.payout_release_at || null,
+    customerId: p.customer_id || null,
+  }
+}
+
+function mapTokoInfo(d) {
+  if (!d) return null
+  return {
+    tokoId: d.toko_id, faq: d.faq || '', garansi: d.garansi || '',
+    policy: d.policy || '', infoLain: d.info_lain || '',
+  }
+}
+
+function mapStreamPost(p, extra = {}) {
+  let foto = []
+  try { foto = p.foto ? JSON.parse(p.foto) : [] } catch { foto = [] }
+  const tokoData = p.toko || extra.toko
+  return {
+    id: p.id,
+    toko: tokoData ? { id: tokoData.id, nama: tokoData.nama, slug: tokoData.slug, logo: tokoData.logo, pro: tokoData.plan === 'pro' } : null,
+    teks: p.teks, postType: p.post_type || null, kategori: p.kategori || null, foto,
+    shopLink: p.shop_link ? { slug: p.shop_link.slug, nama: p.shop_link.nama } : null,
+    hashtags: extra.hashtags || [],
+    likesCount: p.likes_count || 0, repostsCount: p.reposts_count || 0, repliesCount: p.replies_count || 0,
+    liked: !!extra.liked, reposted: !!extra.reposted, bookmarked: !!extra.bookmarked,
+    previewReplies: extra.previewReplies || [], createdAt: p.created_at,
+  }
+}
+
+function mapStreamReply(r) {
+  return {
+    id: r.id, postId: r.post_id, parentReplyId: r.parent_reply_id,
+    toko: r.toko ? { id: r.toko.id, nama: r.toko.nama, slug: r.toko.slug, logo: r.toko.logo, pro: r.toko.plan === 'pro' } : null,
+    teks: r.teks, likesCount: r.likes_count, createdAt: r.created_at,
+  }
+}
+
+function buildReplyTree(replies, likedSet) {
+  const byId = {}
+  replies.forEach(r => { byId[r.id] = { ...mapStreamReply(r), liked: likedSet.has(r.id), replies: [] } })
+  const roots = []
+  replies.forEach(r => {
+    const node = byId[r.id]
+    if (r.parent_reply_id && byId[r.parent_reply_id]) byId[r.parent_reply_id].replies.push(node)
+    else roots.push(node)
+  })
+  return roots
+}
+
+async function getViewerFlags(viewerTokoId, postIds) {
+  if (!viewerTokoId || !postIds.length) return { liked: new Set(), reposted: new Set(), bookmarked: new Set() }
+  const [{ data: likes }, { data: reposts }, { data: bookmarks }] = await Promise.all([
+    supabaseAdmin.from('stream_likes').select('target_id').eq('toko_id', viewerTokoId).eq('target_type', 'post').in('target_id', postIds),
+    supabaseAdmin.from('stream_reposts').select('post_id').eq('toko_id', viewerTokoId).in('post_id', postIds),
+    supabaseAdmin.from('stream_bookmarks').select('post_id').eq('toko_id', viewerTokoId).in('post_id', postIds),
+  ])
+  return {
+    liked: new Set((likes || []).map(l => l.target_id)),
+    reposted: new Set((reposts || []).map(r => r.post_id)),
+    bookmarked: new Set((bookmarks || []).map(b => b.post_id)),
+  }
+}
+
+async function getViewerFlagsMixed(viewerTokoId, postId, replyIds) {
+  if (!viewerTokoId) return { likedPost: false, reposted: false, bookmarked: false, likedReplies: new Set() }
+  const [{ data: likePost }, { data: repost }, { data: bookmark }, { data: likeReplies }] = await Promise.all([
+    supabaseAdmin.from('stream_likes').select('id').eq('toko_id', viewerTokoId).eq('target_type', 'post').eq('target_id', postId).maybeSingle(),
+    supabaseAdmin.from('stream_reposts').select('id').eq('toko_id', viewerTokoId).eq('post_id', postId).maybeSingle(),
+    supabaseAdmin.from('stream_bookmarks').select('id').eq('toko_id', viewerTokoId).eq('post_id', postId).maybeSingle(),
+    replyIds.length
+      ? supabaseAdmin.from('stream_likes').select('target_id').eq('toko_id', viewerTokoId).eq('target_type', 'reply').in('target_id', replyIds)
+      : { data: [] },
+  ])
+  return {
+    likedPost: !!likePost, reposted: !!repost, bookmarked: !!bookmark,
+    likedReplies: new Set((likeReplies || []).map(l => l.target_id)),
+  }
+}
+
+// ================================================
+// AUTH
+// ================================================
+
+const authApi = {
+  loginWithGoogle: async (googleUser) => {
+    const { data: existingUser } = await supabaseAdmin
+      .from('users')
+      .select('id, terms_accepted_at')
+      .eq('google_id', googleUser.sub)
+      .maybeSingle()
+
+    const userData = {
+      email: googleUser.email,
+      name: googleUser.name,
+      picture: googleUser.picture,
+      google_id: googleUser.sub,
+      updated_at: new Date().toISOString(),
+    }
+
+    if (googleUser.agreedToTerms) {
+      userData.terms_accepted_at = new Date().toISOString()
+      userData.terms_version = 'v1.0'
+    } else if (!existingUser) {
+      throw new ApiError('Anda harus menyetujui Syarat Layanan dan Kebijakan Privasi', 400)
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('users')
+      .upsert(userData, { onConflict: 'google_id' })
+      .select()
+      .single()
+    if (error) handleError(error)
+
+    const token = crypto.randomUUID().replace(/-/g, '') + crypto.randomUUID().replace(/-/g, '')
+    const expiresAt = new Date()
+    expiresAt.setDate(expiresAt.getDate() + 30)
+
+    const { error: tokenError } = await supabaseAdmin
+      .from('tokens')
+      .insert({ token, user_id: data.id, expires_at: expiresAt.toISOString() })
+    if (tokenError) handleError(tokenError)
+
+    return { success: true, data: { user: mapUser(data), token } }
+  },
+
+  getMe: async (token) => {
+    const userId = await verifyToken(token)
+    const { data, error } = await supabaseAdmin.from('users').select('*').eq('id', userId).single()
+    if (error) handleError(error)
+    return { success: true, data: mapUser(data) }
+  },
+
+  logout: async (token) => {
+    const { error } = await supabaseAdmin.from('tokens').delete().eq('token', token)
+    if (error) handleError(error)
+    return { success: true }
+  },
+}
+
+// ================================================
+// CUSTOMER (buyer per-toko)
+// Login Google, tapi scoped ke toko_id — 1 akun Google bisa jadi
+// customer di banyak toko, masing-masing baris terpisah (bukan
+// akun global lintas-tenant).
+// ================================================
+const customerApi = {
+  loginWithGoogle: async (googleUser, tokoId) => {
+    if (!tokoId) throw new ApiError('tokoId diperlukan', 400)
+    const { data: toko } = await supabasePublic.from('toko').select('id').eq('id', tokoId).maybeSingle()
+    if (!toko) throw new ApiError('Toko tidak ditemukan', 404)
+    const { data: customer, error } = await supabaseAdmin
+      .from('customers')
+      .upsert({
+        toko_id: tokoId,
+        google_id: googleUser.sub,
+        email: googleUser.email,
+        name: googleUser.name,
+        picture: googleUser.picture,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'toko_id,google_id' })
+      .select()
+      .single()
+    if (error) handleError(error)
+    const token = crypto.randomUUID().replace(/-/g, '') + crypto.randomUUID().replace(/-/g, '')
+    const expiresAt = new Date()
+    expiresAt.setDate(expiresAt.getDate() + 30)
+    const { error: tokenError } = await supabaseAdmin
+      .from('customer_tokens')
+      .insert({ token, customer_id: customer.id, expires_at: expiresAt.toISOString() })
+    if (tokenError) handleError(tokenError)
+    return { success: true, data: { customer: mapCustomer(customer), token } }
+  },
+  getMe: async (token) => {
+    const customerId = await verifyCustomerToken(token)
+    const { data, error } = await supabaseAdmin.from('customers').select('*').eq('id', customerId).single()
+    if (error) handleError(error)
+    return { success: true, data: mapCustomer(data) }
+  },
+  logout: async (token) => {
+    const { error } = await supabaseAdmin.from('customer_tokens').delete().eq('token', token)
+    if (error) handleError(error)
+    return { success: true }
+  },
+  getMyOrders: async (token) => {
+    const customerId = await verifyCustomerToken(token)
+    const { data, error } = await supabaseAdmin
+      .from('pesanan')
+      .select('*')
+      .eq('customer_id', customerId)
+      .order('created_at', { ascending: false })
+    if (error) handleError(error)
+    return { success: true, data: (data || []).map(mapPesanan) }
+  },
+}
+
+// ================================================
+// TOKO
+// ================================================
+
+const tokoApi = {
+  create: async (token, data) => {
+    const userId = await verifyToken(token)
+    const { nama, slug, deskripsi, wa } = data
+    const { data: toko, error } = await supabaseAdmin
+      .from('toko')
+      .insert({
+        user_id: userId, nama, slug, deskripsi: deskripsi || '', wa: wa || '',
+        tema: 'default', plan: 'free', aktif: true,
+        created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+      })
+      .select()
+      .single()
+    if (error) handleError(error)
+
+    await supabaseAdmin.from('users').update({ toko_id: toko.id, updated_at: new Date().toISOString() }).eq('id', userId)
+    return { success: true, data: mapToko(toko) }
+  },
+
+  update: async (token, tokoId, data) => {
+  const userId = await verifyToken(token)
+  const { customDomain, originAreaId, originAreaLabel, ...rest } = data
+  const normalizedDomain = customDomain && customDomain.trim() !== '' ? customDomain.trim() : null
+
+  const updatePayload = { ...rest, custom_domain: normalizedDomain, updated_at: new Date().toISOString() }
+
+  if (originAreaId !== undefined) {
+    updatePayload.origin_area_id = originAreaId || null
+    updatePayload.origin_area_label = originAreaId ? (originAreaLabel || null) : null
+  }
+
+  const { error } = await supabaseAdmin
+    .from('toko')
+    .update(updatePayload)
+    .eq('id', tokoId).eq('user_id', userId)
+  if (error) handleError(error)
+  return { success: true }
+},
+
+  delete: async (token, tokoId) => {
+    const userId = await verifyToken(token)
+    const { error } = await supabaseAdmin.from('toko').delete().eq('id', tokoId).eq('user_id', userId)
+    if (error) handleError(error)
+    return { success: true }
+  },
+
+  getMine: async (token) => {
+    const userId = await verifyToken(token)
+    const { data, error } = await supabaseAdmin.from('toko').select('*').eq('user_id', userId).single()
+    if (error && error.code !== 'PGRST116') handleError(error)
+    return { success: true, data: mapToko(data) }
+  },
+
+  getBySlug: async (slug) => {
+    const { data, error } = await supabasePublic.from('toko').select('*').eq('slug', slug).maybeSingle()
+    if (error) handleError(error)
+    if (!data) throw new ApiError('Toko tidak ditemukan', 404)
+    return { success: true, data: mapToko(data) }
+  },
+
+  checkSlug: async (slug) => {
+    const { data } = await supabasePublic.from('toko').select('id').eq('slug', slug).maybeSingle()
+    return { success: true, data: { available: !data } }
+  },
+
+  requestUpgrade: async (token) => {
+    await verifyToken(token)
+    return { success: true, message: 'Request upgrade terkirim' }
+  },
+
+  // REVISI: sekarang wajib admin (verifyAdminToken), dan targetPlan
+  // dari parameter benar-benar dipakai (dulu di-hardcode 'pro').
+  confirmUpgrade: async (adminToken, userId, targetPlan = 'pro') => {
+    await verifyAdminToken(adminToken)
+
+    const validPlans = ['starter', 'pro', 'business']
+    const normalizedPlan = String(targetPlan || 'pro').toLowerCase()
+    if (!validPlans.includes(normalizedPlan)) {
+      throw new ApiError(`Plan tidak valid: ${targetPlan}`, 400)
+    }
+
+    const expiry = new Date()
+    expiry.setMonth(expiry.getMonth() + 1)
+
+    const { error } = await supabaseAdmin
+      .from('users')
+      .update({ plan: normalizedPlan, plan_expiry: expiry.toISOString(), updated_at: new Date().toISOString() })
+      .eq('id', userId)
+    if (error) handleError(error)
+
+    const { error: tokoSyncErr } = await supabaseAdmin
+      .from('toko')
+      .update({ plan: normalizedPlan, updated_at: new Date().toISOString() })
+      .eq('user_id', userId)
+      .select()
+    if (tokoSyncErr) handleError(tokoSyncErr)
+
+    return { success: true }
+  },
+  search: async (query) => {
+    if (!query || query.length < 2) return { success: true, data: [] };
+    const q = `%${query}%`;
+    const { data, error } = await supabasePublic
+      .from('toko')
+      .select('id, slug, nama, logo')
+      .or(`slug.ilike.${q},nama.ilike.${q}`)
+      .limit(10);
+    if (error) handleError(error);
+    return { success: true, data: data || [] };
+  },
+}
+
+// ================================================
+// PRODUK — DENGAN VALIDASI FOTO LIMIT
+// ================================================
+
+const produkApi = {
+  create: async (token, data) => {
+    const userId = await verifyToken(token)
+    const { data: toko } = await supabaseAdmin.from('toko').select('id').eq('user_id', userId).single()
+    if (!toko) throw new ApiError('Buat toko dulu', 400)
+
+    const { data: userRow } = await supabaseAdmin
+      .from('users')
+      .select('plan, plan_expiry')
+      .eq('id', userId)
+      .single()
+
+    const maxFoto = getFotoLimit(userRow?.plan)
+    validateFotoLimit(data.foto, maxFoto)
+
+    const { data: produk, error } = await supabaseAdmin
+      .from('produk')
+      .insert({
+        toko_id: toko.id, user_id: userId, nama: data.nama, deskripsi: data.deskripsi || '',
+        harga: Number(data.harga), harga_coret: data.hargaCoret ? Number(data.hargaCoret) : null,
+        hpp: data.hpp !== undefined && data.hpp !== null && data.hpp !== '' ? Number(data.hpp) : null,
+        stok: data.stok ? Number(data.stok) : null, kategori: data.kategori || '',
+        berat: data.berat ? Number(data.berat) : null, foto: data.foto || '[]',
+        aktif: data.aktif !== false,
+        is_preorder: data.isPreorder || false,
+        preorder_ready_date: data.isPreorder && data.preorderReadyDate ? data.preorderReadyDate : null,
+        harga_flash: data.hargaFlash ? Number(data.hargaFlash) : null,
+        flash_sale_until: data.flashSaleUntil || null,
+        created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+      })
+      .select()
+      .single()
+    if (error) handleError(error)
+    return { success: true, data: mapProduk(produk) }
+  },
+
+  update: async (token, produkId, data) => {
+    const userId = await verifyToken(token)
+
+    if (data.foto !== undefined) {
+      const { data: userRow } = await supabaseAdmin
+        .from('users')
+        .select('plan, plan_expiry')
+        .eq('id', userId)
+        .single()
+
+      const maxFoto = getFotoLimit(userRow?.plan)
+      validateFotoLimit(data.foto, maxFoto)
+    }
+
+    const updatePayload = {}
+    if (data.nama !== undefined) updatePayload.nama = data.nama
+    if (data.deskripsi !== undefined) updatePayload.deskripsi = data.deskripsi
+    if (data.harga !== undefined) updatePayload.harga = data.harga
+    if (data.hargaCoret !== undefined) updatePayload.harga_coret = data.hargaCoret
+    if (data.hpp !== undefined) updatePayload.hpp = data.hpp
+    if (data.stok !== undefined) updatePayload.stok = data.stok
+    if (data.kategori !== undefined) updatePayload.kategori = data.kategori
+    if (data.berat !== undefined) updatePayload.berat = data.berat
+    if (data.foto !== undefined) updatePayload.foto = data.foto
+    if (data.aktif !== undefined) updatePayload.aktif = data.aktif
+    if (data.isPreorder !== undefined) updatePayload.is_preorder = data.isPreorder
+    if (data.preorderReadyDate !== undefined) updatePayload.preorder_ready_date = data.isPreorder ? data.preorderReadyDate : null
+    if (data.hargaFlash !== undefined) updatePayload.harga_flash = data.hargaFlash
+    if (data.flashSaleUntil !== undefined) updatePayload.flash_sale_until = data.flashSaleUntil
+    updatePayload.updated_at = new Date().toISOString()
+
+    const { error } = await supabaseAdmin.from('produk').update(updatePayload).eq('id', produkId).eq('user_id', userId)
+    if (error) handleError(error)
+    return { success: true }
+  },
+
+  delete: async (token, produkId) => {
+    const userId = await verifyToken(token)
+    const { error } = await supabaseAdmin.from('produk').delete().eq('id', produkId).eq('user_id', userId)
+    if (error) handleError(error)
+    return { success: true }
+  },
+
+  getMine: async (token) => {
+    const userId = await verifyToken(token)
+    const { data, error } = await supabaseAdmin.from('produk').select('*').eq('user_id', userId).order('created_at', { ascending: false })
+    if (error) handleError(error)
+    return { success: true, data: (data || []).map(mapProduk) }
+  },
+
+  getByToko: async (tokoId, params = {}) => {
+    const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tokoId)
+    let actualTokoId = tokoId
+
+    const { data: toko } = isUUID
+      ? await supabasePublic.from('toko').select('id').eq('id', tokoId).maybeSingle()
+      : await supabasePublic.from('toko').select('id').eq('slug', tokoId).maybeSingle()
+
+    if (toko) actualTokoId = toko.id
+
+    let query = supabasePublic.from('produk').select('*').eq('toko_id', actualTokoId).eq('aktif', true).order('created_at', { ascending: false })
+    if (params.kategori) query = query.eq('kategori', params.kategori)
+
+    const { data, error } = await query
+    if (error) handleError(error)
+    return { success: true, data: (data || []).map(mapProduk) }
+  },
+
+  getById: async (produkId) => {
+    const { data, error } = await supabasePublic.from('produk').select('*').eq('id', produkId).single()
+    if (error) handleError(error)
+    return { success: true, data: mapProduk(data) }
+  },
+}
+
+// ================================================
+// PESANAN — DENGAN ORDER ID GENERATOR
+// REVISI: create sekarang mengambil ulang harga dari produk di DB,
+// tidak percaya harga/total kiriman client mentah-mentah. Ini mencegah
+// buyer memodifikasi payload checkout untuk membayar harga sembarangan.
+// Sekarang juga menyimpan customer_id (opsional, null kalau guest
+// checkout / belum login sebagai customer).
+// ================================================
+
+const pesananApi = {
+  create: async (data) => {
+    const orderId = await generateOrderId()
+
+    // BARU: validasi harga & snapshot HPP dari produk di DB, bukan
+    // dari client. Kalau produkId dikirim, harga & nama produk diambil
+    // ulang dari tabel produk (source of truth), qty tetap dari client
+    // (batasan stok divalidasi di tempat lain / masih longgar).
+    let hargaFinal = Number(data.harga) || 0
+    let produkNamaFinal = data.produkNama
+    let hppSnapshot = null
+
+    if (data.produkId) {
+      const { data: produkRow, error: produkErr } = await supabasePublic
+        .from('produk')
+        .select('harga, hpp, nama, aktif, harga_flash, flash_sale_until')
+        .eq('id', data.produkId)
+        .maybeSingle()
+
+      if (produkErr || !produkRow) {
+        throw new ApiError('Produk tidak ditemukan', 404)
+      }
+      if (produkRow.aktif === false) {
+        throw new ApiError('Produk sudah tidak tersedia', 400)
+      }
+
+      // Kalau ada flash sale yang masih aktif, pakai harga flash;
+      // selain itu pakai harga normal produk. Client TIDAK dipercaya
+      // untuk menentukan harga.
+      const flashActive = produkRow.harga_flash && produkRow.flash_sale_until && new Date(produkRow.flash_sale_until) > new Date()
+      hargaFinal = flashActive ? Number(produkRow.harga_flash) : Number(produkRow.harga)
+      produkNamaFinal = produkRow.nama
+      hppSnapshot = produkRow.hpp ?? null
+    }
+
+    const qty = Number(data.qty) || 1
+    const totalFinal = hargaFinal * qty
+
+    const { data: pesanan, error } = await supabasePublic
+      .from('pesanan')
+      .insert({
+        order_id: orderId,
+        toko_id: data.tokoId, produk_id: data.produkId, produk_nama: produkNamaFinal,
+        harga: hargaFinal, hpp: hppSnapshot, qty, buyer_nama: data.buyerNama,
+        buyer_wa: data.buyerWa, buyer_alamat: data.buyerAlamat, catatan: data.catatan || '',
+        customer_id: data.customerId || null, // BARU: opsional, null kalau guest checkout
+        total: totalFinal, status: 'pending', kurir: '', resi: '',
+        created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+      })
+      .select()
+      .single()
+    if (error) handleError(error)
+    return { success: true, data: mapPesanan(pesanan) }
+  },
+
+  getMine: async (token, status = 'all') => {
+    const userId = await verifyToken(token)
+    const { data: toko } = await supabaseAdmin.from('toko').select('id, slug').eq('user_id', userId).single()
+    if (!toko) return { success: true, data: [] }
+
+    let query = supabaseAdmin.from('pesanan').select('*').eq('toko_id', toko.id).order('created_at', { ascending: false })
+    if (status && status !== 'all') query = query.eq('status', status)
+
+    const { data, error } = await query
+    if (error) handleError(error)
+    return { success: true, data: (data || []).map(p => mapPesanan({ ...p, toko: { slug: toko.slug } })) }
+  },
+
+  updateStatus: async (token, pesananId, status, kurir, resi) => {
+    await verifyToken(token)
+    const updates = { status, updated_at: new Date().toISOString() }
+    if (kurir !== undefined) updates.kurir = kurir || ''
+    if (resi !== undefined) updates.resi = resi || ''
+    if (status === 'done') updates.done_at = new Date().toISOString()
+
+    const { error } = await supabaseAdmin.from('pesanan').update(updates).eq('id', pesananId)
+    if (error) handleError(error)
+    return { success: true }
+  },
+
+  getById: async (pesananId, buyerWa) => {
+    const { data, error } = await supabasePublic.from('pesanan').select('*').eq('id', pesananId).eq('buyer_wa', buyerWa).single()
+    if (error) handleError(error)
+    return { success: true, data: mapPesanan(data) }
+  },
+
+  getByOrderId: async (orderId, buyerWa) => {
+    let query = supabasePublic
+      .from('pesanan')
+      .select('*, toko:toko_id(id, nama, slug, wa, logo)')
+      .or(`order_id.eq.${orderId},id.eq.${orderId}`)
+
+    const { data: pesanan, error } = await query.maybeSingle()
+
+    if (error || !pesanan) {
+      throw new ApiError('Pesanan tidak ditemukan. Periksa kembali Nomor Order kamu.', 404)
+    }
+
+    // Direct match check if buyerWa provided
+    if (buyerWa) {
+      const cleanWa1 = buyerWa.replace(/\D/g, '')
+      const cleanWa2 = (pesanan.buyer_wa || '').replace(/\D/g, '')
+      if (cleanWa1 && cleanWa2 && !cleanWa2.includes(cleanWa1) && !cleanWa1.includes(cleanWa2)) {
+        throw new ApiError('Nomor WhatsApp tidak cocok dengan data pemesan.', 403)
+      }
+    }
+
+    return { success: true, data: mapPesanan(pesanan) }
+  },
+
+  getByWa: async (buyerWa) => {
+    if (!buyerWa) return { success: true, data: [] }
+    const cleanWa = buyerWa.replace(/\D/g, '')
+    const { data, error } = await supabasePublic
+      .from('pesanan')
+      .select('*, toko:toko_id(id, nama, slug, wa, logo)')
+      .or(`buyer_wa.ilike.%${cleanWa}%,buyer_wa.eq.${buyerWa}`)
+      .order('created_at', { ascending: false })
+
+    if (error) handleError(error)
+    return { success: true, data: (data || []).map(mapPesanan) }
+  },
+
+  getSlugByResi: async (resi) => {
+    const { data, error } = await supabasePublic.from('pesanan').select('resi, toko:toko_id(slug)').eq('resi', resi).single()
+    if (error) handleError(error)
+    return { success: true, data: { slug: data.toko?.slug || null } }
+  },
+}
+
+// ================================================
+// ANALYTICS — DENGAN VALIDASI TIER
+// ================================================
+
+const analyticsApi = {
+  getDashboard: async (token) => {
+    const userId = await verifyToken(token)
+
+    const { data: userRow } = await supabaseAdmin
+      .from('users')
+      .select('plan, plan_expiry')
+      .eq('id', userId)
+      .single()
+    requireStarter(userRow)
+
+    const { data: toko } = await supabaseAdmin.from('toko').select('id').eq('user_id', userId).single()
+    if (!toko) return { success: true, data: {} }
+
+    const { data: produk } = await supabaseAdmin.from('produk').select('*').eq('toko_id', toko.id)
+    const { data: pesanans } = await supabaseAdmin.from('pesanan').select('*').eq('toko_id', toko.id).order('created_at', { ascending: true })
+
+    const allPesanan = pesanans || []
+    const done = allPesanan.filter(p => p.status === 'done')
+    const totalRevenue = done.reduce((s, p) => s + Number(p.total), 0)
+
+    const totalHpp = done.reduce((s, p) => {
+      if (p.hpp === null || p.hpp === undefined) return s
+      return s + Number(p.hpp) * Number(p.qty || 1)
+    }, 0)
+    const totalProfit = totalRevenue - totalHpp
+
+    const revenueHarianMap = {}
+    done.forEach(p => {
+      const date = p.created_at?.slice(0, 10)
+      if (!date) return
+      revenueHarianMap[date] = (revenueHarianMap[date] || 0) + Number(p.total)
+    })
+    const revenueHarian = Object.entries(revenueHarianMap).sort(([a], [b]) => a.localeCompare(b)).map(([date, total]) => ({ date, label: date, total }))
+
+    const revenueBulananMap = {}
+    done.forEach(p => {
+      const yearMonth = p.created_at?.slice(0, 7)
+      if (!yearMonth) return
+      revenueBulananMap[yearMonth] = (revenueBulananMap[yearMonth] || 0) + Number(p.total)
+    })
+    const revenueBulanan = Object.entries(revenueBulananMap).sort(([a], [b]) => a.localeCompare(b)).map(([yearMonth, total]) => ({ label: yearMonth, total }))
+
+    const now = new Date()
+    const dayOfWeek = now.getDay()
+    const startOfThisWeek = new Date(now)
+    startOfThisWeek.setDate(now.getDate() - dayOfWeek)
+    startOfThisWeek.setHours(0, 0, 0, 0)
+    const startOfLastWeek = new Date(startOfThisWeek)
+    startOfLastWeek.setDate(startOfThisWeek.getDate() - 7)
+    const endOfLastWeek = new Date(startOfThisWeek)
+    endOfLastWeek.setMilliseconds(-1)
+
+    const revenueMingguIni = done.filter(p => new Date(p.created_at) >= startOfThisWeek).reduce((s, p) => s + Number(p.total), 0)
+    const revenueMingguLalu = done.filter(p => {
+      const d = new Date(p.created_at)
+      return d >= startOfLastWeek && d <= endOfLastWeek
+    }).reduce((s, p) => s + Number(p.total), 0)
+
+    const produkQtyMap = {}
+    done.forEach(p => {
+      const nama = p.produk_nama || 'Produk'
+      produkQtyMap[nama] = (produkQtyMap[nama] || 0) + Number(p.qty || 1)
+    })
+    const topProduk = Object.entries(produkQtyMap).sort(([, a], [, b]) => b - a).slice(0, 5).map(([nama, qty]) => ({ nama, qty }))
+
+    return {
+      success: true,
+      data: {
+        totalProduk: (produk || []).length,
+        produkAktif: (produk || []).filter(p => p.aktif).length,
+        totalPesanan: allPesanan.length,
+        pesananPending: allPesanan.filter(p => p.status === 'pending').length,
+        pesananConfirmed: allPesanan.filter(p => p.status === 'confirmed').length,
+        pesananProcessing: allPesanan.filter(p => p.status === 'processing').length,
+        pesananShipped: allPesanan.filter(p => p.status === 'shipped').length,
+        pesananSelesai: done.length,
+        pesananCancelled: allPesanan.filter(p => p.status === 'cancelled').length,
+        totalRevenue, totalHpp, totalProfit,
+        revenueMingguIni, revenueMingguLalu,
+        revenueHarian, revenueBulanan, topProduk,
+      }
+    }
+  },
+}
+
+// ================================================
+// TOKO INFO
+// ================================================
+
+const tokoInfoApi = {
+  get: async (token) => {
+    const userId = await verifyToken(token)
+    const { data: toko } = await supabaseAdmin.from('toko').select('id').eq('user_id', userId).single()
+    if (!toko) throw new ApiError('Toko tidak ditemukan', 404)
+
+    const { data, error } = await supabaseAdmin.from('toko_info').select('*').eq('toko_id', toko.id).single()
+    if (error && error.code !== 'PGRST116') handleError(error)
+    return { success: true, data: mapTokoInfo(data) || { tokoId: toko.id, faq: '', garansi: '', policy: '', infoLain: '' } }
+  },
+
+  update: async (token, data) => {
+    const userId = await verifyToken(token)
+    const { data: toko } = await supabaseAdmin.from('toko').select('id').eq('user_id', userId).single()
+    if (!toko) throw new ApiError('Toko tidak ditemukan', 404)
+
+    const { error } = await supabaseAdmin
+      .from('toko_info')
+      .upsert({ toko_id: toko.id, faq: data.faq || '', garansi: data.garansi || '', policy: data.policy || '', info_lain: data.infoLain || '' }, { onConflict: 'toko_id' })
+    if (error) handleError(error)
+    return { success: true }
+  },
+}
+
+// ================================================
+// RATING
+// ================================================
+
+const ratingApi = {
+  add: async (data) => {
+    const { data: rating, error } = await supabasePublic
+      .from('rating')
+      .insert({
+        toko_id: data.tokoId, produk_id: data.produkId, buyer_nama: data.buyerNama,
+        rating: Number(data.rating), komentar: data.komentar || '', created_at: new Date().toISOString(),
+      })
+      .select()
+      .single()
+    if (error) handleError(error)
+    return { success: true, data: rating }
+  },
+
+  get: async (params) => {
+    let query = supabasePublic.from('rating').select('*').order('created_at', { ascending: false })
+    if (params.produkId) query = query.eq('produk_id', params.produkId)
+    if (params.tokoId) query = query.eq('toko_id', params.tokoId)
+
+    const { data, error } = await query
+    if (error) handleError(error)
+
+    const avgRating = data?.length ? (data.reduce((s, r) => s + Number(r.rating), 0) / data.length).toFixed(1) : null
+    return { success: true, data: { ratings: data || [], total: (data || []).length, avgRating: avgRating ? Number(avgRating) : null } }
+  },
+}
+
+// ================================================
+// ADMIN
+// REVISI: SEMUA method di bawah ini sekarang wajib verifyAdminToken(),
+// bukan verifyToken() biasa. Sebelumnya siapapun user dengan token
+// valid bisa memanggil action ini.
+// ================================================
+
+const adminApi = {
+  getUsers: async (token) => {
+    await verifyAdminToken(token)
+    const { data: users, error: usersError } = await supabaseAdmin.from('users').select('*').order('created_at', { ascending: false })
+    if (usersError) handleError(usersError)
+
+    const { data: tokos } = await supabaseAdmin.from('toko').select('*')
+    const { data: produks } = await supabaseAdmin.from('produk').select('id, user_id')
+    const { data: pesanans } = await supabaseAdmin.from('pesanan').select('id, toko_id')
+
+    const result = (users || []).map(u => {
+      const toko = (tokos || []).find(t => t.user_id === u.id)
+      return {
+        id: u.id, name: u.name, email: u.email, picture: u.picture,
+        plan: u.plan || 'free', planExpiry: u.plan_expiry || null, createdAt: u.created_at,
+        tokoNama: toko?.nama || null, tokoSlug: toko?.slug || null, tokoAktif: toko?.aktif !== false,
+        totalProduk: (produks || []).filter(p => p.user_id === u.id).length,
+        totalPesanan: toko ? (pesanans || []).filter(p => p.toko_id === toko.id).length : 0,
+      }
+    })
+    return { success: true, data: result }
+  },
+
+  getStats: async (token) => {
+    await verifyAdminToken(token)
+    const { count: totalUser } = await supabaseAdmin.from('users').select('*', { count: 'exact', head: true })
+    const { count: totalToko } = await supabaseAdmin.from('toko').select('*', { count: 'exact', head: true })
+    const { count: totalProduk } = await supabaseAdmin.from('produk').select('*', { count: 'exact', head: true })
+    return { success: true, data: { totalUser, totalToko, totalProduk } }
+  },
+
+  grantPlan: async (token, targetUserId, targetPlan, months) => {
+    await verifyAdminToken(token)
+
+    const validPlans = ['starter', 'pro', 'business']
+    if (!validPlans.includes(targetPlan)) {
+      throw new ApiError(`Plan tidak valid: ${targetPlan}`, 400)
+    }
+
+    const expiry = new Date()
+    expiry.setMonth(expiry.getMonth() + Number(months || 1))
+
+    const { error: userErr } = await supabaseAdmin
+      .from('users')
+      .update({ plan: targetPlan, plan_expiry: expiry.toISOString(), updated_at: new Date().toISOString() })
+      .eq('id', targetUserId)
+    if (userErr) handleError(userErr)
+
+    const { data: tokoData, error: tokoFindErr } = await supabaseAdmin
+      .from('toko').select('id').eq('user_id', targetUserId).single()
+    if (tokoFindErr || !tokoData) throw new ApiError('Toko tidak ditemukan untuk user ini', 404)
+
+    const { error: tokoErr } = await supabaseAdmin
+      .from('toko').update({ plan: targetPlan, updated_at: new Date().toISOString() }).eq('id', tokoData.id)
+    if (tokoErr) handleError(tokoErr)
+
+    return { success: true, message: `${targetPlan} aktif ${months} bulan` }
+  },
+
+  grantPro: async (token, targetUserId, months) => {
+    await verifyAdminToken(token)
+    const expiry = new Date()
+    expiry.setMonth(expiry.getMonth() + Number(months || 1))
+
+    const { error: userErr } = await supabaseAdmin
+      .from('users').update({ plan: 'pro', plan_expiry: expiry.toISOString(), updated_at: new Date().toISOString() }).eq('id', targetUserId)
+    if (userErr) handleError(userErr)
+
+    const { data: tokoData, error: tokoFindErr } = await supabaseAdmin.from('toko').select('id').eq('user_id', targetUserId).single()
+    if (tokoFindErr || !tokoData) throw new ApiError('Toko tidak ditemukan untuk user ini', 404)
+
+    const { error: tokoErr } = await supabaseAdmin.from('toko').update({ plan: 'pro', updated_at: new Date().toISOString() }).eq('id', tokoData.id)
+    if (tokoErr) handleError(tokoErr)
+
+    return { success: true, message: `Pro aktif ${months} bulan` }
+  },
+
+  revokePro: async (token, targetUserId) => {
+    await verifyAdminToken(token)
+    const { error: userErr } = await supabaseAdmin
+      .from('users').update({ plan: 'free', plan_expiry: null, updated_at: new Date().toISOString() }).eq('id', targetUserId)
+    if (userErr) handleError(userErr)
+
+    const { data: tokoData, error: tokoFindErr } = await supabaseAdmin.from('toko').select('id').eq('user_id', targetUserId).single()
+    if (tokoFindErr || !tokoData) throw new ApiError('Toko tidak ditemukan untuk user ini', 404)
+
+    const { error: tokoErr } = await supabaseAdmin.from('toko').update({ plan: 'free', updated_at: new Date().toISOString() }).eq('id', tokoData.id)
+    if (tokoErr) handleError(tokoErr)
+
+    return { success: true, message: 'Pro berhasil dicabut' }
+  },
+
+  deleteUser: async (token, targetUserId) => {
+    await verifyAdminToken(token)
+    const { data: toko } = await supabaseAdmin.from('toko').select('id').eq('user_id', targetUserId).single()
+    const tokoId = toko?.id || null
+    await supabaseAdmin.from('tokens').delete().eq('user_id', targetUserId)
+    await supabaseAdmin.from('produk').delete().eq('user_id', targetUserId)
+    if (tokoId) {
+      await supabaseAdmin.from('pesanan').delete().eq('toko_id', tokoId)
+      await supabaseAdmin.from('toko_info').delete().eq('toko_id', tokoId)
+      await supabaseAdmin.from('toko').delete().eq('id', tokoId)
+    }
+    const { error } = await supabaseAdmin.from('users').delete().eq('id', targetUserId)
+    if (error) handleError(error)
+    return { success: true, message: 'User berhasil dihapus' }
+  },
+}
+
+// ================================================
+// STREAM API
+// REVISI: requireStarter() dilepas dari method-method di bawah ini
+// (createPost, addReply, toggleLike, toggleRepost, toggleBookmark,
+// openDmThread, sendDmMessage, uploadImage) supaya Stream kebuka
+// penuh untuk plan free juga — bukan cuma starter ke atas.
+// ================================================
+
+const streamApi = {
+  getFeed: async (token, params = {}) => {
+    const userId = await verifyToken(token)
+    const { data: viewerToko } = await supabaseAdmin.from('toko').select('id').eq('user_id', userId).single()
+    const viewerTokoId = viewerToko?.id || null
+
+    let query = supabaseAdmin
+      .from('stream_posts')
+      .select('*, toko:toko_id(id,nama,slug,logo,plan), shop_link:shop_link_toko_id(id,nama,slug)')
+      .order('created_at', { ascending: false })
+      .limit(params.limit || 30)
+
+    if (params.search) query = query.ilike('teks', `%${params.search}%`)
+    if (params.tag) {
+      const { data: tagRows } = await supabaseAdmin.from('stream_hashtags').select('post_id').eq('tag', params.tag)
+      const ids = (tagRows || []).map(r => r.post_id)
+      if (!ids.length) return { success: true, data: [] }
+      query = query.in('id', ids)
+    }
+
+    const { data: posts, error } = await query
+    if (error) handleError(error)
+
+    const ids = (posts || []).map(p => p.id)
+    const [{ data: hashtagRows }, { data: allReplies }, viewerFlags] = await Promise.all([
+      ids.length ? supabaseAdmin.from('stream_hashtags').select('post_id, tag').in('post_id', ids) : { data: [] },
+      ids.length ? supabaseAdmin.from('stream_replies').select('*, toko:toko_id(id,nama,slug,logo,plan)').in('post_id', ids).order('created_at', { ascending: true }) : { data: [] },
+      getViewerFlags(viewerTokoId, ids),
+    ])
+
+    const hashtagsByPost = {}
+    ;(hashtagRows || []).forEach(h => { (hashtagsByPost[h.post_id] ||= []).push(h.tag) })
+
+    const repliesByPost = {}
+    ;(allReplies || []).forEach(r => { (repliesByPost[r.post_id] ||= []).push(r) })
+
+    const result = (posts || []).map(p => mapStreamPost(p, {
+      hashtags: hashtagsByPost[p.id] || [],
+      previewReplies: buildReplyTree(repliesByPost[p.id] || [], new Set()),
+      liked: viewerFlags.liked.has(p.id),
+      reposted: viewerFlags.reposted.has(p.id),
+      bookmarked: viewerFlags.bookmarked.has(p.id),
+    }))
+
+    return { success: true, data: result }
+  },
+
+  getPublicShowcase: async (params = {}) => {
+    const allowedTypes = ['produk_baru', 'penjualan', 'tips_jualan']
+    let query = supabaseAdmin
+      .from('stream_posts')
+      .select('*, toko:toko_id(id,nama,slug,logo,plan), shop_link:shop_link_toko_id(id,nama,slug)')
+      .in('post_type', allowedTypes)
+      .order('created_at', { ascending: false })
+      .limit(params.limit || 20)
+
+    if (params.search) query = query.ilike('teks', `%${params.search}%`)
+    if (params.kategori) query = query.eq('kategori', params.kategori)
+    if (params.tag) {
+      const { data: tagRows } = await supabaseAdmin.from('stream_hashtags').select('post_id').eq('tag', params.tag)
+      const ids = (tagRows || []).map(r => r.post_id)
+      if (!ids.length) return { success: true, data: [] }
+      query = query.in('id', ids)
+    }
+
+    const { data: posts, error } = await query
+    if (error) handleError(error)
+
+    const ids = (posts || []).map(p => p.id)
+    const { data: hashtagRows } = ids.length ? await supabaseAdmin.from('stream_hashtags').select('post_id, tag').in('post_id', ids) : { data: [] }
+
+    const hashtagsByPost = {}
+    ;(hashtagRows || []).forEach(h => { (hashtagsByPost[h.post_id] ||= []).push(h.tag) })
+
+    const result = (posts || []).map(p => mapStreamPost(p, { hashtags: hashtagsByPost[p.id] || [] }))
+    return { success: true, data: result }
+  },
+
+  getShowcaseStats: async () => {
+    const allowedTypes = ['produk_baru', 'penjualan', 'tips_jualan']
+    const { count, error } = await supabaseAdmin
+      .from('stream_posts')
+      .select('*', { count: 'exact', head: true })
+      .in('post_type', allowedTypes)
+    if (error) handleError(error)
+    return { success: true, data: { totalPost: count || 0 } }
+  },
+
+  getPostDetail: async (token, postId) => {
+    const userId = await verifyToken(token)
+    const { data: viewerToko } = await supabaseAdmin.from('toko').select('id').eq('user_id', userId).single()
+    const viewerTokoId = viewerToko?.id || null
+
+    const { data: post, error } = await supabaseAdmin
+      .from('stream_posts')
+      .select('*, toko:toko_id(id,nama,slug,logo,plan), shop_link:shop_link_toko_id(id,nama,slug)')
+      .eq('id', postId)
+      .single()
+    if (error) handleError(error)
+
+    const { data: hashtagRows } = await supabaseAdmin.from('stream_hashtags').select('tag').eq('post_id', postId)
+    const { data: allReplies } = await supabaseAdmin
+      .from('stream_replies').select('*, toko:toko_id(id,nama,slug,logo,plan)').eq('post_id', postId).order('created_at', { ascending: true })
+
+    const replyIds = (allReplies || []).map(r => r.id)
+    const flags = await getViewerFlagsMixed(viewerTokoId, postId, replyIds)
+    const tree = buildReplyTree(allReplies || [], flags.likedReplies)
+
+    return {
+      success: true,
+      data: {
+        ...mapStreamPost(post, { hashtags: (hashtagRows || []).map(h => h.tag), liked: flags.likedPost, reposted: flags.reposted, bookmarked: flags.bookmarked }),
+        replies: tree,
+      }
+    }
+  },
+
+  createPost: async (token, data) => {
+    const userId = await verifyToken(token)
+    const { data: toko } = await supabaseAdmin.from('toko').select('*').eq('user_id', userId).single()
+    if (!toko) throw new ApiError('Buat toko dulu', 400)
+
+    const hashtags = extractHashtags(data.teks)
+    const { data: post, error } = await supabaseAdmin
+      .from('stream_posts')
+      .insert({
+        toko_id: toko.id, teks: data.teks, post_type: data.postType || null,
+        kategori: data.kategori || null,
+        foto: JSON.stringify(data.foto || []), shop_link_toko_id: data.shopLinkTokoId || null,
+        created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+      })
+      .select()
+      .single()
+    if (error) handleError(error)
+
+    if (hashtags.length) {
+      await supabaseAdmin.from('stream_hashtags').insert(hashtags.map(tag => ({ post_id: post.id, tag })))
+    }
+    return { success: true, data: mapStreamPost(post, { toko, hashtags }) }
+  },
+
+  deletePost: async (token, postId) => {
+    const userId = await verifyToken(token)
+    const { data: toko } = await supabaseAdmin.from('toko').select('id').eq('user_id', userId).single()
+    if (!toko) throw new ApiError('Toko tidak ditemukan', 404)
+
+    const { data: post } = await supabaseAdmin.from('stream_posts').select('toko_id').eq('id', postId).single()
+    if (!post) throw new ApiError('Post tidak ditemukan', 404)
+    if (post.toko_id !== toko.id) throw new ApiError('Tidak diizinkan menghapus post ini', 403)
+
+    await supabaseAdmin.from('stream_hashtags').delete().eq('post_id', postId)
+    await supabaseAdmin.from('stream_replies').delete().eq('post_id', postId)
+    await supabaseAdmin.from('stream_likes').delete().eq('target_type', 'post').eq('target_id', postId)
+    await supabaseAdmin.from('stream_reposts').delete().eq('post_id', postId)
+    await supabaseAdmin.from('stream_bookmarks').delete().eq('post_id', postId)
+    await supabaseAdmin.from('stream_notifications').delete().eq('ref_post_id', postId)
+
+    const { error } = await supabaseAdmin.from('stream_posts').delete().eq('id', postId)
+    if (error) handleError(error)
+    return { success: true }
+  },
+
+  addReply: async (token, { postId, parentReplyId, teks }) => {
+    const userId = await verifyToken(token)
+    const { data: toko } = await supabaseAdmin.from('toko').select('*').eq('user_id', userId).single()
+    if (!toko) throw new ApiError('Buat toko dulu', 400)
+
+    const { data: reply, error } = await supabaseAdmin
+      .from('stream_replies')
+      .insert({ post_id: postId, parent_reply_id: parentReplyId || null, toko_id: toko.id, teks, created_at: new Date().toISOString() })
+      .select()
+      .single()
+    if (error) handleError(error)
+
+    const { data: post } = await supabaseAdmin.from('stream_posts').select('toko_id').eq('id', postId).single()
+    if (post && post.toko_id !== toko.id) {
+      await supabaseAdmin.from('stream_notifications').insert({
+        toko_id: post.toko_id, type: 'reply', actor_toko_id: toko.id, ref_post_id: postId, ref_reply_id: reply.id, created_at: new Date().toISOString(),
+      })
+    }
+
+    if (parentReplyId) {
+      const { data: parentReply } = await supabaseAdmin.from('stream_replies').select('toko_id').eq('id', parentReplyId).single()
+      if (parentReply && parentReply.toko_id !== toko.id) {
+        await supabaseAdmin.from('stream_notifications').insert({
+          toko_id: parentReply.toko_id, type: 'reply', actor_toko_id: toko.id,
+          ref_post_id: postId, ref_reply_id: reply.id, created_at: new Date().toISOString(),
+        })
+      }
+    }
+
+    return { success: true, data: mapStreamReply({ ...reply, toko }) }
+  },
+
+  toggleLike: async (token, { targetType, targetId }) => {
+    const userId = await verifyToken(token)
+    const { data: toko } = await supabaseAdmin.from('toko').select('*').eq('user_id', userId).single()
+    if (!toko) throw new ApiError('Buat toko dulu', 400)
+
+    const { data: existing } = await supabaseAdmin
+      .from('stream_likes').select('id').eq('toko_id', toko.id).eq('target_type', targetType).eq('target_id', targetId).maybeSingle()
+
+    if (existing) {
+      const { error } = await supabaseAdmin.from('stream_likes').delete().eq('id', existing.id)
+      if (error) handleError(error)
+      return { success: true, data: { liked: false } }
+    }
+
+    const { error } = await supabaseAdmin.from('stream_likes').insert({
+      toko_id: toko.id, target_type: targetType, target_id: targetId, created_at: new Date().toISOString(),
+    })
+    if (error) handleError(error)
+
+    if (targetType === 'post') {
+      const { data: post } = await supabaseAdmin.from('stream_posts').select('toko_id').eq('id', targetId).single()
+      if (post && post.toko_id !== toko.id) {
+        await supabaseAdmin.from('stream_notifications').insert({
+          toko_id: post.toko_id, type: 'like', actor_toko_id: toko.id, ref_post_id: targetId, created_at: new Date().toISOString(),
+        })
+      }
+    }
+    return { success: true, data: { liked: true } }
+  },
+
+  toggleRepost: async (token, { postId }) => {
+    const userId = await verifyToken(token)
+    const { data: toko } = await supabaseAdmin.from('toko').select('*').eq('user_id', userId).single()
+    if (!toko) throw new ApiError('Buat toko dulu', 400)
+
+    const { data: existing } = await supabaseAdmin.from('stream_reposts').select('id').eq('toko_id', toko.id).eq('post_id', postId).maybeSingle()
+    if (existing) {
+      const { error } = await supabaseAdmin.from('stream_reposts').delete().eq('id', existing.id)
+      if (error) handleError(error)
+      return { success: true, data: { reposted: false } }
+    }
+
+    const { error } = await supabaseAdmin.from('stream_reposts').insert({ toko_id: toko.id, post_id: postId, created_at: new Date().toISOString() })
+    if (error) handleError(error)
+
+    const { data: post } = await supabaseAdmin.from('stream_posts').select('toko_id').eq('id', postId).single()
+    if (post && post.toko_id !== toko.id) {
+      await supabaseAdmin.from('stream_notifications').insert({
+        toko_id: post.toko_id, type: 'repost', actor_toko_id: toko.id, ref_post_id: postId, created_at: new Date().toISOString(),
+      })
+    }
+    return { success: true, data: { reposted: true } }
+  },
+
+  toggleBookmark: async (token, { postId }) => {
+    const userId = await verifyToken(token)
+    const { data: toko } = await supabaseAdmin.from('toko').select('id').eq('user_id', userId).single()
+    if (!toko) throw new ApiError('Buat toko dulu', 400)
+
+    const { data: existing } = await supabaseAdmin.from('stream_bookmarks').select('id').eq('toko_id', toko.id).eq('post_id', postId).maybeSingle()
+    if (existing) {
+      await supabaseAdmin.from('stream_bookmarks').delete().eq('id', existing.id)
+      return { success: true, data: { bookmarked: false } }
+    }
+
+    await supabaseAdmin.from('stream_bookmarks').insert({ toko_id: toko.id, post_id: postId, created_at: new Date().toISOString() })
+    return { success: true, data: { bookmarked: true } }
+  },
+
+  getDmThreads: async (token) => {
+    const userId = await verifyToken(token)
+    const { data: toko } = await supabaseAdmin.from('toko').select('id').eq('user_id', userId).single()
+    if (!toko) return { success: true, data: [] }
+
+    const { data: threads, error } = await supabaseAdmin
+      .from('stream_dm_threads')
+      .select('*, toko_a:toko_a_id(id,nama,slug,logo,plan), toko_b:toko_b_id(id,nama,slug,logo,plan)')
+      .or(`toko_a_id.eq.${toko.id},toko_b_id.eq.${toko.id}`)
+      .order('last_message_at', { ascending: false })
+    if (error) handleError(error)
+
+    const threadIds = (threads || []).map(t => t.id)
+    const { data: msgs } = threadIds.length
+      ? await supabaseAdmin.from('stream_dm_messages').select('*').in('thread_id', threadIds).order('created_at', { ascending: false })
+      : { data: [] }
+
+    const lastByThread = {}
+    ;(msgs || []).forEach(m => { if (!lastByThread[m.thread_id]) lastByThread[m.thread_id] = m })
+
+    const unreadCount = {}
+    ;(msgs || []).forEach(m => { if (m.sender_toko_id !== toko.id && !m.read_at) unreadCount[m.thread_id] = (unreadCount[m.thread_id] || 0) + 1 })
+
+    const result = (threads || []).map(t => {
+      const other = t.toko_a_id === toko.id ? t.toko_b : t.toko_a
+      const last = lastByThread[t.id]
+      return {
+        id: t.id,
+        toko: other ? { id: other.id, nama: other.nama, slug: other.slug, logo: other.logo, pro: other.plan === 'pro' } : null,
+        lastMessage: last?.teks || '', lastMessageAt: t.last_message_at, unread: unreadCount[t.id] || 0,
+      }
+    })
+    return { success: true, data: result }
+  },
+
+  getDmMessages: async (token, threadId) => {
+    const userId = await verifyToken(token)
+    const { data: toko } = await supabaseAdmin.from('toko').select('id').eq('user_id', userId).single()
+    if (!toko) throw new ApiError('Toko tidak ditemukan', 404)
+
+    const { data: messages, error } = await supabaseAdmin.from('stream_dm_messages').select('*').eq('thread_id', threadId).order('created_at', { ascending: true })
+    if (error) handleError(error)
+
+    await supabaseAdmin.from('stream_dm_messages').update({ read_at: new Date().toISOString() }).eq('thread_id', threadId).neq('sender_toko_id', toko.id).is('read_at', null)
+
+    return {
+      success: true,
+      data: (messages || []).map(m => ({ id: m.id, threadId: m.thread_id, teks: m.teks, createdAt: m.created_at, isMine: m.sender_toko_id === toko.id })),
+    }
+  },
+
+  openDmThread: async (token, { otherTokoId }) => {
+    const userId = await verifyToken(token)
+    const { data: toko } = await supabaseAdmin.from('toko').select('*').eq('user_id', userId).single()
+    if (!toko) throw new ApiError('Buat toko dulu', 400)
+
+    if (otherTokoId === toko.id) throw new ApiError('Gak bisa DM toko sendiri', 400)
+    const [a, b] = [toko.id, otherTokoId].sort()
+
+    const { data: existing } = await supabaseAdmin.from('stream_dm_threads').select('id').eq('toko_a_id', a).eq('toko_b_id', b).maybeSingle()
+    if (existing) return { success: true, data: { threadId: existing.id } }
+
+    const { data: thread, error } = await supabaseAdmin
+      .from('stream_dm_threads')
+      .insert({ toko_a_id: a, toko_b_id: b, created_at: new Date().toISOString(), last_message_at: new Date().toISOString() })
+      .select()
+      .single()
+    if (error) handleError(error)
+    return { success: true, data: { threadId: thread.id } }
+  },
+
+  sendDmMessage: async (token, { threadId, teks }) => {
+    const userId = await verifyToken(token)
+    const { data: toko } = await supabaseAdmin.from('toko').select('id').eq('user_id', userId).single()
+    if (!toko) throw new ApiError('Buat toko dulu', 400)
+
+    const { data: msg, error } = await supabaseAdmin
+      .from('stream_dm_messages')
+      .insert({ thread_id: threadId, sender_toko_id: toko.id, teks, created_at: new Date().toISOString() })
+      .select()
+      .single()
+    if (error) handleError(error)
+
+    const { data: thread } = await supabaseAdmin.from('stream_dm_threads').select('toko_a_id, toko_b_id').eq('id', threadId).single()
+    const recipientId = thread ? (thread.toko_a_id === toko.id ? thread.toko_b_id : thread.toko_a_id) : null
+    if (recipientId) {
+      await supabaseAdmin.from('stream_notifications').insert({
+        toko_id: recipientId, type: 'dm', actor_toko_id: toko.id, ref_thread_id: threadId, created_at: new Date().toISOString(),
+      })
+    }
+    return { success: true, data: { id: msg.id, threadId, teks: msg.teks, createdAt: msg.created_at, isMine: true } }
+  },
+
+  getNotifications: async (token) => {
+    const userId = await verifyToken(token)
+    const { data: toko } = await supabaseAdmin.from('toko').select('id').eq('user_id', userId).single()
+    if (!toko) return { success: true, data: [] }
+
+    const { data, error } = await supabaseAdmin
+      .from('stream_notifications')
+      .select('*, actor:actor_toko_id(id,nama,slug,logo), post:ref_post_id(teks), reply:ref_reply_id(teks)')
+      .eq('toko_id', toko.id)
+      .order('created_at', { ascending: false })
+      .limit(50)
+    if (error) handleError(error)
+
+    const excerpt = (txt) => {
+      if (!txt) return null
+      const clean = String(txt).trim()
+      return clean.length > 60 ? clean.slice(0, 60) + '...' : clean
+    }
+
+    return {
+      success: true,
+      data: (data || []).map(n => ({
+        id: n.id, type: n.type,
+        actor: n.actor ? { id: n.actor.id, nama: n.actor.nama, slug: n.actor.slug, logo: n.actor.logo } : null,
+        refPostId: n.ref_post_id, refReplyId: n.ref_reply_id, refThreadId: n.ref_thread_id,
+        postExcerpt: excerpt(n.post?.teks), replyExcerpt: excerpt(n.reply?.teks),
+        isRead: n.is_read, createdAt: n.created_at,
+      }))
+    }
+  },
+
+  markNotificationsRead: async (token) => {
+    const userId = await verifyToken(token)
+    const { data: toko } = await supabaseAdmin.from('toko').select('id').eq('user_id', userId).single()
+    if (!toko) return { success: true }
+    const { error } = await supabaseAdmin.from('stream_notifications').update({ is_read: true }).eq('toko_id', toko.id).eq('is_read', false)
+    if (error) handleError(error)
+    return { success: true }
+  },
+
+  uploadImage: async (token, { fileBase64, fileName, contentType }) => {
+    const userId = await verifyToken(token)
+    const { data: toko } = await supabaseAdmin.from('toko').select('id').eq('user_id', userId).single()
+    if (!toko) throw new ApiError('Buat toko dulu', 400)
+
+    const cloudName = process.env.CLOUDINARY_CLOUD_NAME || 'dgplz1pd0'
+    const uploadPreset = process.env.CLOUDINARY_UPLOAD_PRESET || 'exora_uploads'
+
+    // 1. Prioritaskan Cloudinary jika CLOUDINARY_CLOUD_NAME dikonfigurasi di Server Environment
+    if (cloudName) {
+      try {
+        const formData = new URLSearchParams()
+        formData.append('file', `data:${contentType || 'image/jpeg'};base64,${fileBase64}`)
+        formData.append('upload_preset', uploadPreset || 'exora_uploads')
+        formData.append('folder', `exora/${toko.id}`)
+
+        const cRes = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/image/upload`, {
+          method: 'POST',
+          body: formData
+        })
+        const cData = await cRes.json()
+        if (cData.secure_url) {
+          return { success: true, data: { url: cData.secure_url } }
+        }
+      } catch (cErr) {
+        console.warn('Cloudinary upload failed, falling back to Supabase storage:', cErr)
+      }
+    }
+
+    // 2. Fallback ke Supabase Storage (stream-images bucket)
+    const binaryStr = atob(fileBase64)
+    const bytes = new Uint8Array(binaryStr.length)
+    for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i)
+
+    const ext = (fileName.split('.').pop() || 'jpg').toLowerCase()
+    const path = `${toko.id}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`
+
+    const { error: upErr } = await supabaseAdmin.storage.from('stream-images').upload(path, bytes, { contentType: contentType || 'image/jpeg', upsert: false })
+    if (upErr) handleError(upErr)
+
+    const { data: pub } = supabaseAdmin.storage.from('stream-images').getPublicUrl(path)
+    return { success: true, data: { url: pub.publicUrl } }
+  },
+}
+
+// ================================================
+// LIVE
+// (tidak dipakai saat ini — LivePage.jsx dikonfirmasi non-aktif.
+// Tetap disertakan agar endpoint tidak error kalau ada legacy call.)
+// ================================================
+
+const liveApi = {
+  goLive: async (token, { title }) => {
+    const userId = await verifyToken(token)
+    const { data: toko } = await supabaseAdmin.from('toko').select('*').eq('user_id', userId).single()
+    if (!toko) throw new ApiError('Toko tidak ditemukan', 404)
+    const { data: userRow } = await supabaseAdmin.from('users').select('plan, plan_expiry').eq('id', userId).single()
+    requirePro(userRow)
+
+    await supabaseAdmin.from('live_sessions').update({ is_active: false }).eq('toko_id', toko.id).eq('is_active', true)
+
+    const roomName = `live-${toko.id}-${Date.now()}`
+
+    const { data: session, error } = await supabaseAdmin
+      .from('live_sessions')
+      .insert({ toko_id: toko.id, room_name: roomName, title, is_active: true, viewer_count: 0, created_at: new Date().toISOString() })
+      .select()
+      .single()
+    if (error) handleError(error)
+
+    const at = new AccessToken(process.env.LIVEKIT_API_KEY, process.env.LIVEKIT_API_SECRET, {
+      identity: `host-${toko.id}`,
+      name: toko.nama,
+    })
+    at.addGrant({ roomJoin: true, room: roomName, canPublish: true, canSubscribe: true })
+
+    return { success: true, data: { session, livekitToken: await at.toJwt(), roomName, livekitUrl: process.env.LIVEKIT_URL } }
+  },
+
+  endLive: async (token, { roomName }) => {
+    const userId = await verifyToken(token)
+    const { data: toko } = await supabaseAdmin.from('toko').select('id').eq('user_id', userId).single()
+    if (!toko) throw new ApiError('Toko tidak ditemukan', 404)
+
+    const { error } = await supabaseAdmin
+      .from('live_sessions')
+      .update({ is_active: false })
+      .eq('room_name', roomName)
+      .eq('toko_id', toko.id)
+    if (error) handleError(error)
+
+    return { success: true }
+  },
+
+  getActiveSessions: async (token) => {
+    const { data, error } = await supabaseAdmin
+      .from('live_sessions')
+      .select('*, toko:toko_id(id, nama, slug, logo)')
+      .eq('is_active', true)
+      .order('created_at', { ascending: false })
+    if (error) handleError(error)
+    return { success: true, data: data || [] }
+  },
+
+  joinLive: async (dataOrToken, maybeData) => {
+    const isTokenString = typeof dataOrToken === 'string'
+    const token = isTokenString ? dataOrToken : null
+    const { roomName } = isTokenString ? (maybeData || {}) : (dataOrToken || {})
+
+    let identity = `viewer-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+    let displayName = 'Pembeli'
+
+    if (token) {
+      try {
+        const userId = await verifyToken(token)
+        const { data: toko } = await supabaseAdmin.from('toko').select('id, nama').eq('user_id', userId).single()
+        if (toko) {
+          identity = `viewer-${toko.id}`
+          displayName = toko.nama
+        }
+      } catch {}
+    }
+
+    const { data: session } = await supabaseAdmin.from('live_sessions').select('*').eq('room_name', roomName).eq('is_active', true).single()
+    if (!session) throw new ApiError('Session tidak ditemukan', 404)
+
+    await supabaseAdmin.from('live_sessions').update({ viewer_count: (session.viewer_count || 0) + 1 }).eq('id', session.id)
+
+    const at = new AccessToken(process.env.LIVEKIT_API_KEY, process.env.LIVEKIT_API_SECRET, { identity, name: displayName })
+    at.addGrant({ roomJoin: true, room: roomName, canPublish: false, canSubscribe: true })
+
+    return { success: true, data: { livekitToken: await at.toJwt(), roomName, livekitUrl: process.env.LIVEKIT_URL } }
+  },
+
+  sendReaction: async (token, { roomName, emoji }) => {
+    const userId = await verifyToken(token)
+    const { data: toko } = await supabaseAdmin.from('toko').select('id').eq('user_id', userId).single()
+    if (!toko) throw new ApiError('Toko tidak ditemukan', 404)
+
+    const { error } = await supabaseAdmin
+      .from('live_reactions')
+      .insert({ room_name: roomName, toko_id: toko.id, emoji, created_at: new Date().toISOString() })
+    if (error) handleError(error)
+
+    return { success: true }
+  },
+
+  leaveRoom: async (token, { roomName }) => {
+    const userId = await verifyToken(token)
+    const { data: toko } = await supabaseAdmin.from('toko').select('id').eq('user_id', userId).single()
+    if (!toko) throw new ApiError('Toko tidak ditemukan', 404)
+
+    const { data: session } = await supabaseAdmin.from('live_sessions').select('viewer_count').eq('room_name', roomName).single()
+    if (session && session.viewer_count > 0) {
+      await supabaseAdmin.from('live_sessions').update({ viewer_count: session.viewer_count - 1 }).eq('room_name', roomName)
+    }
+
+    return { success: true }
+  },
+}
+
+// ================================================
+// TRAFFIC API
+// ================================================
+
+const trafficApi = {
+  trackVisit: async (tokoId) => {
+    if (!tokoId) return { success: true }
+    const { error } = await supabaseAdmin
+      .from('toko_visits')
+      .insert({ toko_id: tokoId, visited_at: new Date().toISOString() })
+    if (error) console.warn('trackVisit error:', error.message)
+    return { success: true }
+  },
+
+  getStats: async (token) => {
+    const userId = await verifyToken(token)
+    const { data: toko } = await supabaseAdmin.from('toko').select('id').eq('user_id', userId).single()
+    if (!toko) return { success: true, data: {} }
+    const now = new Date()
+    const start30 = new Date(now)
+    start30.setDate(now.getDate() - 30)
+    const { data: visits, error } = await supabaseAdmin
+      .from('toko_visits')
+      .select('visited_at')
+      .eq('toko_id', toko.id)
+      .gte('visited_at', start30.toISOString())
+      .order('visited_at', { ascending: true })
+    if (error) handleError(error)
+    const totalVisit = (visits || []).length
+    const byDay = {}
+    ;(visits || []).forEach(v => {
+      const day = v.visited_at?.slice(0, 10)
+      if (day) byDay[day] = (byDay[day] || 0) + 1
+    })
+    const visitHarian = Object.entries(byDay)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, count]) => ({ date, count }))
+    return { success: true, data: { totalVisit, visitHarian } }
+  },
+}
+
+// ================================================
+// BUNDLE PRODUK
+// ================================================
+
+function mapBundle(b) {
+  if (!b) return null
+  let produkIds = []
+  try { produkIds = b.produk_ids ? JSON.parse(b.produk_ids) : [] } catch { produkIds = [] }
+  return {
+    id: b.id, tokoId: b.toko_id, nama: b.nama, deskripsi: b.deskripsi,
+    hargaBundle: b.harga_bundle, produkIds, aktif: b.aktif,
+    createdAt: b.created_at, updatedAt: b.updated_at,
+  }
+}
+
+const bundleApi = {
+  create: async (token, data) => {
+    const userId = await verifyToken(token)
+    const { data: toko } = await supabaseAdmin.from('toko').select('id').eq('user_id', userId).single()
+    if (!toko) throw new ApiError('Buat toko dulu', 400)
+
+    const { data: bundle, error } = await supabaseAdmin
+      .from('produk_bundle')
+      .insert({
+        toko_id: toko.id, nama: data.nama, deskripsi: data.deskripsi || '',
+        harga_bundle: Number(data.hargaBundle), produk_ids: JSON.stringify(data.produkIds || []),
+        aktif: data.aktif !== false,
+        created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+      })
+      .select()
+      .single()
+
+    if (error) handleError(error)
+    return { success: true, data: mapBundle(bundle) }
+  },
+
+  update: async (token, bundleId, data) => {
+    const userId = await verifyToken(token)
+    const { data: toko } = await supabaseAdmin.from('toko').select('id').eq('user_id', userId).single()
+    if (!toko) throw new ApiError('Toko tidak ditemukan', 404)
+
+    const payload = {}
+    if (data.nama !== undefined) payload.nama = data.nama
+    if (data.deskripsi !== undefined) payload.deskripsi = data.deskripsi
+    if (data.hargaBundle !== undefined) payload.harga_bundle = Number(data.hargaBundle)
+    if (data.produkIds !== undefined) payload.produk_ids = JSON.stringify(data.produkIds)
+    if (data.aktif !== undefined) payload.aktif = data.aktif
+    payload.updated_at = new Date().toISOString()
+
+    const { error } = await supabaseAdmin.from('produk_bundle').update(payload).eq('id', bundleId).eq('toko_id', toko.id)
+    if (error) handleError(error)
+    return { success: true }
+  },
+
+  delete: async (token, bundleId) => {
+    const userId = await verifyToken(token)
+    const { data: toko } = await supabaseAdmin.from('toko').select('id').eq('user_id', userId).single()
+    if (!toko) throw new ApiError('Toko tidak ditemukan', 404)
+
+    const { error } = await supabaseAdmin.from('produk_bundle').delete().eq('id', bundleId).eq('toko_id', toko.id)
+    if (error) handleError(error)
+    return { success: true }
+  },
+
+  getMine: async (token) => {
+    const userId = await verifyToken(token)
+    const { data: toko } = await supabaseAdmin.from('toko').select('id').eq('user_id', userId).single()
+    if (!toko) return { success: true, data: [] }
+
+    const { data, error } = await supabaseAdmin
+      .from('produk_bundle').select('*').eq('toko_id', toko.id).order('created_at', { ascending: false })
+    if (error) handleError(error)
+    return { success: true, data: (data || []).map(mapBundle) }
+  },
+
+  getByToko: async (tokoId) => {
+    const { data, error } = await supabasePublic
+      .from('produk_bundle').select('*').eq('toko_id', tokoId).eq('aktif', true).order('created_at', { ascending: false })
+    if (error) handleError(error)
+    return { success: true, data: (data || []).map(mapBundle) }
+  },
+}
+
+// ================================================
+// FLASH SALE
+// ================================================
+
+const flashSaleApi = {
+  set: async (token, produkId, data) => {
+    const userId = await verifyToken(token)
+    const { data: userRow } = await supabaseAdmin.from('users').select('plan, plan_expiry').eq('id', userId).single()
+    requirePro(userRow)
+
+    const payload = {}
+    if (data.hargaFlash !== undefined) payload.harga_flash = Number(data.hargaFlash)
+    if (data.flashSaleUntil !== undefined) payload.flash_sale_until = data.flashSaleUntil
+    payload.updated_at = new Date().toISOString()
+
+    const { error } = await supabaseAdmin.from('produk').update(payload).eq('id', produkId).eq('user_id', userId)
+    if (error) handleError(error)
+    return { success: true }
+  },
+
+  clear: async (token, produkId) => {
+    const userId = await verifyToken(token)
+    const { error } = await supabaseAdmin
+      .from('produk')
+      .update({ harga_flash: null, flash_sale_until: null, updated_at: new Date().toISOString() })
+      .eq('id', produkId)
+      .eq('user_id', userId)
+    if (error) handleError(error)
+    return { success: true }
+  },
+
+  getActive: async (tokoId) => {
+    const now = new Date().toISOString()
+    const { data, error } = await supabasePublic
+      .from('produk')
+      .select('*')
+      .eq('toko_id', tokoId)
+      .eq('aktif', true)
+      .not('harga_flash', 'is', null)
+      .gt('flash_sale_until', now)
+      .order('flash_sale_until', { ascending: true })
+    if (error) handleError(error)
+    return {
+      success: true,
+      data: (data || []).map(p => ({ ...mapProduk(p), hargaFlash: p.harga_flash, flashSaleUntil: p.flash_sale_until }))
+    }
+  },
+}
+
+// ================================================
+// VOUCHER / KUPON
+// ================================================
+
+function mapVoucher(v) {
+  if (!v) return null
+  return {
+    id: v.id, tokoId: v.toko_id, kode: v.kode, tipe: v.tipe, nilai: v.nilai,
+    minBelanja: v.min_belanja, maksDiskon: v.maks_diskon, kuota: v.kuota,
+    terpakai: v.terpakai, aktif: v.aktif, berlakuSampai: v.berlaku_sampai,
+    createdAt: v.created_at, updatedAt: v.updated_at,
+  }
+}
+
+const voucherApi = {
+  create: async (token, data) => {
+    const userId = await verifyToken(token)
+    const { data: toko } = await supabaseAdmin.from('toko').select('id').eq('user_id', userId).single()
+    if (!toko) throw new ApiError('Buat toko dulu', 400)
+    const { data: userRow } = await supabaseAdmin.from('users').select('plan, plan_expiry').eq('id', userId).single()
+    requirePro(userRow)
+
+    const kode = data.kode?.toUpperCase().trim()
+    if (!kode) throw new ApiError('Kode voucher wajib diisi', 400)
+
+    const { data: existing } = await supabaseAdmin
+      .from('vouchers').select('id').eq('toko_id', toko.id).eq('kode', kode).maybeSingle()
+    if (existing) throw new ApiError('Kode voucher sudah dipakai', 400)
+
+    const { data: voucher, error } = await supabaseAdmin
+      .from('vouchers')
+      .insert({
+        toko_id: toko.id, kode, tipe: data.tipe || 'persen', nilai: Number(data.nilai),
+        min_belanja: data.minBelanja ? Number(data.minBelanja) : null,
+        maks_diskon: data.maksDiskon ? Number(data.maksDiskon) : null,
+        kuota: data.kuota ? Number(data.kuota) : null, terpakai: 0,
+        aktif: data.aktif !== false, berlaku_sampai: data.berlakuSampai || null,
+        created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+      })
+      .select()
+      .single()
+    if (error) handleError(error)
+    return { success: true, data: mapVoucher(voucher) }
+  },
+
+  getMine: async (token) => {
+    const userId = await verifyToken(token)
+    const { data: toko } = await supabaseAdmin.from('toko').select('id').eq('user_id', userId).single()
+    if (!toko) return { success: true, data: [] }
+
+    const { data, error } = await supabaseAdmin
+      .from('vouchers').select('*').eq('toko_id', toko.id).order('created_at', { ascending: false })
+    if (error) handleError(error)
+    return { success: true, data: (data || []).map(mapVoucher) }
+  },
+
+  delete: async (token, voucherId) => {
+    const userId = await verifyToken(token)
+    const { data: toko } = await supabaseAdmin.from('toko').select('id').eq('user_id', userId).single()
+    if (!toko) throw new ApiError('Toko tidak ditemukan', 404)
+
+    const { error } = await supabaseAdmin.from('vouchers').delete().eq('id', voucherId).eq('toko_id', toko.id)
+    if (error) handleError(error)
+    return { success: true }
+  },
+
+  validate: async (tokoId, kode, totalBelanja) => {
+    const now = new Date().toISOString()
+    const { data: voucher, error } = await supabasePublic
+      .from('vouchers').select('*').eq('toko_id', tokoId).eq('kode', kode.toUpperCase().trim()).eq('aktif', true).single()
+
+    if (error || !voucher) throw new ApiError('Kode voucher tidak valid', 400)
+    if (voucher.berlaku_sampai && voucher.berlaku_sampai < now) throw new ApiError('Voucher sudah kadaluarsa', 400)
+    if (voucher.kuota && voucher.terpakai >= voucher.kuota) throw new ApiError('Kuota voucher habis', 400)
+    if (voucher.min_belanja && Number(totalBelanja) < voucher.min_belanja) {
+      throw new ApiError(`Minimum belanja Rp ${Number(voucher.min_belanja).toLocaleString('id-ID')}`, 400)
+    }
+
+    let diskon = 0
+    if (voucher.tipe === 'persen') {
+      diskon = Math.round(Number(totalBelanja) * (voucher.nilai / 100))
+      if (voucher.maks_diskon) diskon = Math.min(diskon, voucher.maks_diskon)
+    } else {
+      diskon = voucher.nilai
+    }
+    diskon = Math.min(diskon, Number(totalBelanja))
+
+    return {
+      success: true,
+      data: { voucherId: voucher.id, kode: voucher.kode, tipe: voucher.tipe, nilai: voucher.nilai, diskon, totalSetelahDiskon: Number(totalBelanja) - diskon }
+    }
+  },
+
+  redeem: async (voucherId) => {
+    const { error } = await supabasePublic.rpc('increment_voucher_terpakai', { p_voucher_id: voucherId })
+    if (error) console.warn('redeem voucher error:', error.message)
+    return { success: true }
+  },
+}
+
+// ================================================
+// REGISTRY — daftar semua action yang valid
+// Format action string: "namaApi.namaMethod"
+//
+// CATATAN: paymentApi TIDAK ada di sini lagi — sudah dipindah
+// sepenuhnya ke /api/payment.js (Midtrans). Jangan tambahkan
+// paymentApi mock kembali di file ini.
+// ================================================
+
+const REGISTRY = {
+  authApi, customerApi, tokoApi, produkApi, pesananApi, analyticsApi,
+  tokoInfoApi, ratingApi, adminApi, streamApi, liveApi,
+  trafficApi, bundleApi, flashSaleApi, voucherApi
+}
+
+// ================================================
+// HANDLER — entrypoint Vercel serverless function
+// ================================================
+
+export default async function handler(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', '*')
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+
+  if (req.method === 'OPTIONS') return res.status(200).end()
+  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed' })
+
+  try {
+    const { action, token, args = [] } = req.body || {}
+    if (!action || typeof action !== 'string' || !action.includes('.')) {
+      return res.status(400).json({ success: false, message: 'Action tidak valid' })
+    }
+
+    const [apiName, methodName] = action.split('.')
+    const apiObj = REGISTRY[apiName]
+    if (!apiObj || typeof apiObj[methodName] !== 'function') {
+      return res.status(400).json({ success: false, message: `Action tidak dikenal: ${action}` })
+    }
+
+    const fn = apiObj[methodName]
+    const result = token !== undefined && token !== null
+      ? await fn(token, ...args)
+      : await fn(...args)
+
+    return res.status(200).json(result)
+  } catch (err) {
+    const status = err.status || 500
+    return res.status(status).json({ success: false, message: err.message || 'Terjadi kesalahan server' })
+  }
+}

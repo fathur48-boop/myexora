@@ -1,0 +1,6 @@
+{
+  "name": "Exora Tokoku",
+  "description": "Platform toko online mudah dan cepat — Start. Sell. Scale.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
