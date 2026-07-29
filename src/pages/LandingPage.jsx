@@ -4,10 +4,12 @@ import {
   ArrowRight, Package, MessageCircle, Zap, Check, Store,
   BarChart2, Shield, ChevronDown, Music, Video, Megaphone, Bot, Sun, Moon,
   Sparkles, Crown, Server, Lock, Smartphone, Globe, Database, Download,
-  Building2, QrCode, Wallet, ShoppingBag, Tablet, Laptop, Monitor
+  Building2, QrCode, Wallet, ShoppingBag, Tablet, Laptop, Monitor, ShieldCheck, LogOut
 } from 'lucide-react'
 import { CONFIG, PLAN_FEATURES } from '../lib/config'
 import { useTheme } from '../lib/useTheme'
+import { useAuthStore } from '../lib/store'
+import { isAdminEmail } from '../lib/AdminGuard'
 import { motion, useInView, AnimatePresence } from 'framer-motion'
 import FloatingWA from '../components/ui/FloatingWA'
 
@@ -818,6 +820,8 @@ export default function LandingPage() {
   const [scrollProgress, setScrollProgress] = useState(0)
   
   const { theme, toggleTheme } = useTheme()
+  const { user, isAuthenticated, logout } = useAuthStore()
+  const isAdmin = isAdminEmail(user?.email)
   const c = THEMES[theme]
   const accent = theme === 'light' ? NAVY : BLUE
 
@@ -985,14 +989,36 @@ export default function LandingPage() {
                   {theme === 'light' ? <Moon size={14} /> : <Sun size={14} />}
                 </button>
                 <Link to="/showcase" className="btn btn-ghost btn-sm" style={{ whiteSpace: 'nowrap', fontSize: '0.8rem', padding: '6px 10px', textDecoration: 'none' }}>Produk</Link>
-                <Link to="/login" className="btn btn-ghost btn-sm hide-mobile" style={{ whiteSpace: 'nowrap', fontSize: '0.8rem', textDecoration: 'none' }}>Masuk</Link>
-                
-                <MagneticButton className="nav-cta-primary">
-                  <Link to="/login" className="btn btn-primary btn-sm" style={{ whiteSpace: 'nowrap', textDecoration: 'none' }}>
-                    Buka Toko Gratis
-                    <ArrowRight size={14} />
-                  </Link>
-                </MagneticButton>
+                {isAuthenticated ? (
+                  <>
+                    {isAdmin && (
+                      <Link to="/admin" className="btn btn-ghost btn-sm" style={{ whiteSpace: 'nowrap', fontSize: '0.8rem', color: '#f87171', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                        <ShieldCheck size={14} /> Admin
+                      </Link>
+                    )}
+                    <Link to="/dashboard" className="btn btn-primary btn-sm" style={{ whiteSpace: 'nowrap', textDecoration: 'none' }}>
+                      Dashboard Toko
+                    </Link>
+                    <button
+                      onClick={() => logout()}
+                      className="btn btn-ghost btn-sm"
+                      style={{ whiteSpace: 'nowrap', fontSize: '0.8rem', color: '#ef4444', cursor: 'pointer', border: 'none', background: 'none' }}
+                      title="Keluar / Logout"
+                    >
+                      <LogOut size={15} />
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <Link to="/login" className="btn btn-ghost btn-sm hide-mobile" style={{ whiteSpace: 'nowrap', fontSize: '0.8rem', textDecoration: 'none' }}>Masuk</Link>
+                    <MagneticButton className="nav-cta-primary">
+                      <Link to="/login" className="btn btn-primary btn-sm" style={{ whiteSpace: 'nowrap', textDecoration: 'none' }}>
+                        Buka Toko Gratis
+                        <ArrowRight size={14} />
+                      </Link>
+                    </MagneticButton>
+                  </>
+                )}
               </div>
             </div>
           </nav>
