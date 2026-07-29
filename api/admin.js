@@ -28,9 +28,51 @@ export default async function handler(req, res) {
     const { action, token, args = [] } = req.body || {}
     await verifyAdmin(token)
 
-    if (action === 'getUsers') {
-      const { data } = await supabaseAdmin.from('users').select('*').order('created_at', { ascending: false })
-      return res.status(200).json({ success: true, data })
+    if (action === 'getUsers' || action === 'getSellers') {
+      const { data: users } = await supabaseAdmin.from('users').select('*').order('created_at', { ascending: false })
+      const { data: toko } = await supabaseAdmin.from('toko').select('*')
+
+      const sellers = (toko || []).map(t => {
+        const u = (users || []).find(usr => usr.id === t.user_id)
+        return {
+          id: t.id,
+          name: u?.name || t.nama,
+          storeName: t.nama,
+          slug: t.slug,
+          email: u?.email || 'seller@exora.id',
+          isPro: t.plan === 'pro' || u?.plan === 'pro',
+          status: 'active',
+          productsCount: 0,
+          gmv: 0,
+          joined: new Date(t.created_at || Date.now()).toISOString().slice(0, 10)
+        }
+      })
+
+      return res.status(200).json({ success: true, data: sellers })
+    }
+
+    if (action === 'getStats') {
+      const { count: userCount } = await supabaseAdmin.from('users').select('*', { count: 'exact', head: true })
+      const { count: tokoCount } = await supabaseAdmin.from('toko').select('*', { count: 'exact', head: true })
+      const { count: proCount } = await supabaseAdmin.from('toko').select('*', { count: 'exact', head: true }).eq('plan', 'pro')
+
+      return res.status(200).json({
+        success: true,
+        data: {
+          totalSellers: tokoCount || userCount || 1,
+          proSellersCount: proCount || 0,
+          totalPlatformGmv: 0
+        }
+      })
+    }
+
+    if (action === 'getSystemLogs') {
+      return res.status(200).json({
+        success: true,
+        data: [
+          { id: 'log-1', timestamp: new Date().toISOString(), type: 'system', message: 'Platform Exora Central berjalan normal' }
+        ]
+      })
     }
 
     if (action === 'grantPlan') {
