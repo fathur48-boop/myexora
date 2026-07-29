@@ -418,6 +418,7 @@ export default function ProdukForm({ isOpen, onClose, editData, onProductCreated
                 value={form.fotos}
                 onChange={(urls) => set('fotos', urls)}
                 plan={plan}
+                tokenObj={tokenObj}
               />
             </div>
 
