@@ -434,6 +434,13 @@ const authApi = {
       updated_at: new Date().toISOString(),
     }
 
+    // BARU: user baru wajib mulai dari plan 'free', jangan gantung ke
+    // default kolom DB (ternyata default-nya 'starter', bukan 'free').
+    // Untuk user existing, JANGAN overwrite plan yang udah ada.
+    if (!existingUser) {
+      userData.plan = 'free'
+    }
+
     if (googleUser.agreedToTerms) {
       userData.terms_accepted_at = new Date().toISOString()
       userData.terms_version = 'v1.0'
