@@ -5,8 +5,10 @@ import { useAuthStore } from './store'
 export function isAdminEmail(email) {
   if (!email) return false
   const cleanEmail = email.toLowerCase().trim()
-  const adminList = ['fathur48@gmail.com', 'fathur@gmail.com', 'admin@exora.id', 'bahlil.99909@gmail.com', 'admin@tokoku.id']
-  return adminList.some(a => cleanEmail === a.toLowerCase())
+  const defaultAdmins = ['fathur48@gmail.com', 'fathur@gmail.com', 'admin@exora.id', 'bahlil.99909@gmail.com', 'admin@tokoku.id']
+  const envAdmins = (import.meta.env.VITE_ADMIN_EMAILS || '').split(',').map(e => e.trim().toLowerCase()).filter(Boolean)
+  const adminList = [...defaultAdmins, ...envAdmins]
+  return adminList.some(a => cleanEmail === a)
 }
 
 export default function AdminGuard({ children }) {
