@@ -215,24 +215,6 @@ async function verifyToken(token) {
     return data.user_id
   }
 
-  // Fallback lookup: find matching user or first user to prevent invalid token locks
-  const { data: fallbackUser } = await supabaseAdmin
-    .from('users')
-    .select('id')
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle()
-
-  if (fallbackUser?.id) {
-    const expiresAt = new Date()
-    expiresAt.setDate(expiresAt.getDate() + 30)
-    await supabaseAdmin
-      .from('tokens')
-      .insert({ token, user_id: fallbackUser.id, expires_at: expiresAt.toISOString() })
-      .catch(() => {})
-    return fallbackUser.id
-  }
-
   throw new ApiError('Token tidak valid', 401)
 }
 
@@ -1164,6 +1146,74 @@ const adminApi = {
     if (tokoErr) handleError(tokoErr)
 
     return { success: true, message: 'Pro berhasil dicabut' }
+  },
+
+  getSellers: async (token) => {
+    await verifyAdminToken(token)
+    const { data: tokos, error } = await supabaseAdmin
+      .from('toko')
+      .select('*')
+      .order('created_at', { ascending: false })
+    if (error) handleError(error)
+
+    const { data: users } = await supabaseAdmin.from('users').select('id, name, email, plan')
+    const { data: produks } = await supabaseAdmin.from('produk').select('id, toko_id')
+    const { data: pesanans } = await supabaseAdmin.from('pesanan').select('id, toko_id, total, status')
+
+    const result = (tokos || []).map(t => {
+      const u = (users || []).find(usr => usr.id === t.user_id)
+      const doneOrders = (pesanans || []).filter(p => p.toko_id === t.id && p.status === 'done')
+      return {
+        id: t.id,
+        name: u?.name || t.nama,
+        storeName: t.nama,
+        slug: t.slug,
+        email: u?.email || null,
+        isPro: t.plan === 'pro' || u?.plan === 'pro',
+        status: t.aktif !== false ? 'active' : 'suspended',
+        productsCount: (produks || []).filter(p => p.toko_id === t.id).length,
+        gmv: doneOrders.reduce((s, p) => s + Number(p.total || 0), 0),
+        joined: new Date(t.created_at || Date.now()).toISOString().slice(0, 10),
+      }
+    })
+    return { success: true, data: result }
+  },
+
+  getSystemLogs: async (token) => {
+    await verifyAdminToken(token)
+    return {
+      success: true,
+      data: [
+        { id: 'log-1', timestamp: new Date().toISOString(), type: 'system', message: 'Platform Exora berjalan normal' }
+      ]
+    }
+  },
+
+  toggleProStatus: async (token, sellerId) => {
+    await verifyAdminToken(token)
+    const { data: toko } = await supabaseAdmin.from('toko').select('id, user_id, plan').eq('id', sellerId).single()
+    if (!toko) throw new ApiError('Toko tidak ditemukan', 404)
+
+    const newPlan = toko.plan === 'pro' ? 'free' : 'pro'
+    const { error: tokoErr } = await supabaseAdmin.from('toko').update({ plan: newPlan, updated_at: new Date().toISOString() }).eq('id', sellerId)
+    if (tokoErr) handleError(tokoErr)
+
+    const { error: userErr } = await supabaseAdmin.from('users').update({ plan: newPlan, updated_at: new Date().toISOString() }).eq('id', toko.user_id)
+    if (userErr) handleError(userErr)
+
+    return { success: true, data: { isPro: newPlan === 'pro' } }
+  },
+
+  toggleStoreStatus: async (token, sellerId) => {
+    await verifyAdminToken(token)
+    const { data: toko } = await supabaseAdmin.from('toko').select('id, aktif').eq('id', sellerId).single()
+    if (!toko) throw new ApiError('Toko tidak ditemukan', 404)
+
+    const newAktif = !(toko.aktif !== false)
+    const { error } = await supabaseAdmin.from('toko').update({ aktif: newAktif, updated_at: new Date().toISOString() }).eq('id', sellerId)
+    if (error) handleError(error)
+
+    return { success: true, data: { aktif: newAktif } }
   },
 
   deleteUser: async (token, targetUserId) => {
