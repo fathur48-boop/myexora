@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { streamApi } from './api/adminClient'
+import { streamApi, authApi } from './api/adminClient'
 
 interface AuthState {
   user: any
