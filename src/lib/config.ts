@@ -6,7 +6,7 @@ export interface TierConfig {
 }
 
 export const CONFIG = {
-  ADMIN_WA: '6283862720514',
+  ADMIN_WA: import.meta.env.VITE_ADMIN_WA || '6283862720514',
   APP_NAME: 'Exora',
   APP_URL: 'https://myexora.com',
   GOOGLE_CLIENT_ID: import.meta.env.VITE_GOOGLE_CLIENT_ID || 'mock_google_client_id.apps.googleusercontent.com',
