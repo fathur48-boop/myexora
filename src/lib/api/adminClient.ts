@@ -122,8 +122,12 @@ export const ratingApi = {
 // dipanggil dengan token user biasa, server akan menolak dengan 403.
 // ================================================
 export const adminApi = {
-  getUsers: (token: string) => call('adminApi.getUsers', token),
-  getStats: (token: string) => call('adminApi.getStats', token),
+  getUsers: (token?: string) => call('adminApi.getUsers', token || null),
+  getStats: (token?: string) => call('adminApi.getStats', token || null),
+  getSellers: (token?: string) => call('adminApi.getSellers', token || null),
+  getSystemLogs: (token?: string) => call('adminApi.getSystemLogs', token || null),
+  toggleProStatus: (sellerId: string, token?: string) => call('adminApi.toggleProStatus', token || null, sellerId),
+  toggleStoreStatus: (sellerId: string, token?: string) => call('adminApi.toggleStoreStatus', token || null, sellerId),
   grantPlan: (token: string, targetUserId: string, planName: string, months: number) => call('adminApi.grantPlan', token, targetUserId, planName, months),
   grantPro: (token: string, targetUserId: string, months: number) => call('adminApi.grantPro', token, targetUserId, months),
   revokePro: (token: string, targetUserId: string) => call('adminApi.revokePro', token, targetUserId),
