@@ -1,20 +1,24 @@
-import React, { useState, useEffect, useMemo } from 'react'
+import React, { useState, useEffect, useMemo, Suspense, lazy } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import {
-  ShieldAlert, ShieldCheck, Users, Store,
+  ShieldCheck, Users, Store,
   Search, ExternalLink, Zap, RefreshCw,
   Download, Send, FileText, ChevronRight, Bell, Sparkles, LogOut,
   Crown, Clock, BookOpen, HelpCircle, RefreshCcw, Key,
   AlertTriangle, CheckCircle2, Server, Cpu, Globe, ArrowUpRight,
-  X, Calendar, TrendingUp, Settings, User, Mail, MoreVertical
+  X
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import toast from 'react-hot-toast'
 import { adminApi } from '../lib/api'
 import { useAuthStore } from '../lib/store'
-import { formatRupiah } from '../lib/utils'
+import { formatRupiah, getStorefrontUrl } from '../lib/utils'
 import { CONFIG } from '../lib/config'
 import * as XLSX from 'xlsx'
+
+// Lazy-loaded: AdminContentManager dynamic-import TipTap (berat),
+// jadi jangan ikut ke bundle awal AdminPage.
+const AdminContentManager = lazy(() => import('./AdminContentManager'))
 
 // Harga per plan untuk estimasi pendapatan
 const PLAN_PRICES = {
@@ -41,9 +45,9 @@ const DURATION_OPTIONS = [
 export default function AdminPage() {
   const navigate = useNavigate()
   const { logout } = useAuthStore()
-  const [passcode, setPasscode] = useState('')
-  const [isAuthenticated, setIsAuthenticated] = useState(true)
   const [activeTab, setActiveTab] = useState('sellers')
+  // Konten & Artikel: null = tampilkan grid card, sebaliknya render AdminContentManager inline
+  const [manageContentType, setManageContentType] = useState(null)
 
   const [stats, setStats] = useState({
     totalUser: 0, totalToko: 0, totalProduk: 0,
@@ -119,16 +123,6 @@ export default function AdminPage() {
     navigate('/login')
   }
 
-  const handleVerifyPasscode = (e) => {
-    e.preventDefault()
-    if (passcode === 'admin123' || passcode === 'exora') {
-      setIsAuthenticated(true)
-      toast.success('Akses Superadmin Diizinkan 🔓')
-    } else {
-      toast.error('PIN Superadmin salah (Gunakan: exora)')
-    }
-  }
-
   // === OPEN MODAL SET PLAN ===
   const openSetPlan = (seller) => {
     setSetPlanSeller(seller)
@@ -194,7 +188,7 @@ export default function AdminPage() {
       No: idx + 1,
       'Nama Owner': s.name,
       'Nama Toko': s.storeName,
-      'URL Toko': `exora.app/toko/${s.slug}`,
+      'URL Toko': `${window.location.origin}${getStorefrontUrl(s.slug)}`,
       Email: s.email,
       'Paket Subscription': (s.plan || 'free').toUpperCase(),
       'Status Akun': s.status.toUpperCase(),
@@ -251,56 +245,10 @@ export default function AdminPage() {
     return `${days} hari lagi`
   }
 
-  // === UNAUTHENTICATED VIEW ===
-  if (!isAuthenticated) {
-    return (
-      <div style={{
-        minHeight: '100vh', background: '#0a0a0f', color: '#fff',
-        display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24,
-        fontFamily: "'Plus Jakarta Sans', sans-serif"
-      }}>
-        <div style={{
-          maxWidth: 400, width: '100%', background: '#161822',
-          border: '1px solid rgba(255, 255, 255, 0.1)', borderRadius: 24, padding: 32,
-          textAlign: 'center', boxShadow: '0 20px 50px rgba(0,0,0,0.5)'
-        }}>
-          <div style={{
-            width: 56, height: 56, borderRadius: 16, background: 'rgba(239, 68, 68, 0.15)',
-            color: '#ef4444', display: 'flex', alignItems: 'center', justifyContent: 'center',
-            margin: '0 auto 20px'
-          }}>
-            <ShieldAlert size={28} />
-          </div>
-          <h2 style={{ fontSize: '1.4rem', fontWeight: 800, margin: '0 0 8px' }}>Akses Terkunci Admin</h2>
-          <p style={{ color: '#94a3b8', fontSize: '0.88rem', marginBottom: 24 }}>
-            Masukkan PIN Superadmin Exora Platform untuk mengakses dasbor kontrol internal.
-          </p>
-          <form onSubmit={handleVerifyPasscode}>
-            <input
-              type="password"
-              placeholder="PIN Admin (ketik: exora)"
-              value={passcode}
-              onChange={e => setPasscode(e.target.value)}
-              className="form-input"
-              style={{
-                width: '100%', textAlign: 'center', fontSize: '1.1rem', letterSpacing: '0.2em',
-                marginBottom: 16, height: 48, borderRadius: 12, background: '#0f0f14'
-              }}
-              autoFocus
-            />
-            <button type="submit" className="btn btn-primary" style={{ width: '100%', height: 46 }}>
-              Buka Akses Admin
-            </button>
-          </form>
-          <div style={{ marginTop: 20 }}>
-            <Link to="/dashboard" style={{ fontSize: '0.82rem', color: '#64748b', textDecoration: 'none' }}>
-              ← Kembali ke Seller Dashboard
-            </Link>
-          </div>
-        </div>
-      </div>
-    )
-  }
+  // Catatan: akses ke /admin sudah dijaga AdminGuard di level routing
+  // (App.tsx) berdasarkan users.is_admin dari DB — jadi tidak ada lagi
+  // gate PIN lokal di sini. PIN hardcode lama sudah dihapus karena bisa
+  // di-bypass langsung dari devtools/state manapun.
 
   return (
     <div style={{
@@ -578,12 +526,12 @@ export default function AdminPage() {
                               <span>{seller.name}</span> • <span>{seller.email}</span>
                             </div>
                             <a
-                              href={`/toko/${seller.slug}`}
+                              href={getStorefrontUrl(seller.slug)}
                               target="_blank"
                               rel="noopener noreferrer"
                               style={{ color: '#38bdf8', fontSize: '0.72rem', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 4, marginTop: 2 }}
                             >
-                              exora.app/toko/{seller.slug} <ExternalLink size={10} />
+                              {window.location.host}{getStorefrontUrl(seller.slug)} <ExternalLink size={10} />
                             </a>
                           </td>
                           <td style={{ padding: '14px 18px' }}>
@@ -775,60 +723,92 @@ export default function AdminPage() {
 
         {/* === TAB 4: CONTENT MANAGEMENT === */}
         {activeTab === 'content' && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 16 }}>
-              {[
-                { type: 'blog', label: 'Seller Hub / Blog', count: sectionCounts.blog, color: '#3b82f6', icon: BookOpen, link: '/blog', unit: 'artikel' },
-                { type: 'guides', label: 'Panduan / Tutorial', count: sectionCounts.guides, color: '#10b981', icon: FileText, link: '/guides', unit: 'panduan' },
-                { type: 'help', label: 'Pusat Bantuan', count: sectionCounts.help, color: '#a855f7', icon: HelpCircle, link: '/help', unit: 'artikel' },
-                { type: 'updates', label: 'Update Fitur / Changelog', count: sectionCounts.updates, color: '#f59e0b', icon: RefreshCcw, link: '/updates', unit: 'update' },
-                { type: 'credentials', label: 'Integrasi & Kredensial', count: sectionCounts.credentials, color: '#ef4444', icon: Key, link: null, unit: 'kredensial' },
-              ].map((section, idx) => {
-                const Icon = section.icon
-                return (
-                  <div
-                    key={idx}
-                    style={{
-                      background: '#141722',
-                      border: '1px solid rgba(255,255,255,0.08)',
-                      borderRadius: 18,
-                      padding: '18px 24px',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      gap: 16,
-                    }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-                      <div style={{
-                        width: 42, height: 42, borderRadius: 12,
-                        background: `${section.color}15`,
-                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        color: section.color,
-                      }}>
-                        <Icon size={20} />
+          manageContentType ? (
+            <Suspense
+              fallback={
+                <div style={{ textAlign: 'center', padding: 40, color: '#94a3b8' }}>
+                  Memuat editor konten...
+                </div>
+              }
+            >
+              <AdminContentManager
+                type={manageContentType}
+                onBack={() => {
+                  setManageContentType(null)
+                  loadSectionCounts(useAuthStore.getState().token)
+                }}
+              />
+            </Suspense>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 16 }}>
+                {[
+                  { type: 'blog', label: 'Seller Hub / Blog', count: sectionCounts.blog, color: '#3b82f6', icon: BookOpen, publicLink: '/blog', manageable: true, unit: 'artikel' },
+                  { type: 'guides', label: 'Panduan / Tutorial', count: sectionCounts.guides, color: '#10b981', icon: FileText, publicLink: '/guides', manageable: true, unit: 'panduan' },
+                  { type: 'help', label: 'Pusat Bantuan', count: sectionCounts.help, color: '#a855f7', icon: HelpCircle, publicLink: '/help', manageable: true, unit: 'artikel' },
+                  { type: 'updates', label: 'Update Fitur / Changelog', count: sectionCounts.updates, color: '#f59e0b', icon: RefreshCcw, publicLink: '/updates', manageable: false, unit: 'update' },
+                  { type: 'credentials', label: 'Integrasi & Kredensial', count: sectionCounts.credentials, color: '#ef4444', icon: Key, publicLink: null, manageable: false, unit: 'kredensial' },
+                ].map((section, idx) => {
+                  const Icon = section.icon
+                  return (
+                    <div
+                      key={idx}
+                      style={{
+                        background: '#141722',
+                        border: '1px solid rgba(255,255,255,0.08)',
+                        borderRadius: 18,
+                        padding: '18px 24px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        flexWrap: 'wrap',
+                        gap: 16,
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+                        <div style={{
+                          width: 42, height: 42, borderRadius: 12,
+                          background: `${section.color}15`,
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          color: section.color,
+                        }}>
+                          <Icon size={20} />
+                        </div>
+                        <div>
+                          <div style={{ fontSize: '0.95rem', fontWeight: 700, color: '#fff' }}>{section.label}</div>
+                          <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>{section.count} {section.unit}</div>
+                        </div>
                       </div>
-                      <div>
-                        <div style={{ fontSize: '0.95rem', fontWeight: 700, color: '#fff' }}>{section.label}</div>
-                        <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>{section.count} {section.unit}</div>
-                      </div>
+                      {section.manageable ? (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                          {section.publicLink && (
+                            <Link
+                              to={section.publicLink}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="btn btn-ghost btn-sm"
+                              style={{ gap: 6, color: '#94a3b8' }}
+                            >
+                              Lihat <ExternalLink size={13} />
+                            </Link>
+                          )}
+                          <button
+                            onClick={() => setManageContentType(section.type)}
+                            className="btn btn-secondary btn-sm"
+                            style={{ gap: 6, border: 'none', cursor: 'pointer' }}
+                          >
+                            Kelola <ChevronRight size={14} />
+                          </button>
+                        </div>
+                      ) : (
+                        <span style={{ fontSize: '0.78rem', color: '#64748b' }}>Segera hadir</span>
+                      )}
                     </div>
-                    {section.link ? (
-                      <Link
-                        to={section.link}
-                        className="btn btn-secondary btn-sm"
-                        style={{ gap: 6 }}
-                      >
-                        Lihat <ChevronRight size={14} />
-                      </Link>
-                    ) : (
-                      <span style={{ fontSize: '0.78rem', color: '#64748b' }}>Segera hadir</span>
-                    )}
-                  </div>
-                )
-              })}
+                  )
+                })}
+              </div>
             </div>
-          </div>
+          )
         )}
       </main>
 
@@ -886,12 +866,12 @@ export default function AdminPage() {
                 <div style={{ background: '#0e1017', padding: 12, borderRadius: 10 }}>
                   <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginBottom: 2 }}>Link Public Storefront</div>
                   <a
-                    href={`/toko/${selectedSeller.slug}`}
+                    href={getStorefrontUrl(selectedSeller.slug)}
                     target="_blank"
                     rel="noopener noreferrer"
                     style={{ color: '#38bdf8', fontWeight: 600, textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 4 }}
                   >
-                    https://exora.app/toko/{selectedSeller.slug} <ExternalLink size={12} />
+                    {window.location.origin}{getStorefrontUrl(selectedSeller.slug)} <ExternalLink size={12} />
                   </a>
                 </div>
               </div>
