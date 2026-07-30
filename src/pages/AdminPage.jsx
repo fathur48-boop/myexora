@@ -2,33 +2,60 @@ import React, { useState, useEffect, useMemo } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import {
   ShieldAlert, ShieldCheck, Users, Store, DollarSign,
-  Search, Filter, ExternalLink, Power, Zap, RefreshCw,
+  Search, ExternalLink, Zap, RefreshCw,
   Download, Send, Settings, AlertTriangle, CheckCircle2,
-  Server, Lock, Cpu, Globe, ArrowUpRight, ArrowDownRight,
-  MoreVertical, FileText, ChevronRight, Bell, Sparkles, LogOut, MessageSquare
+  Server, Lock, Cpu, Globe, ArrowUpRight,
+  MoreVertical, FileText, ChevronRight, Bell, Sparkles, LogOut,
+  Crown, Clock, BookOpen, HelpCircle, RefreshCcw, Key
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import toast from 'react-hot-toast'
-import { adminApi, pesananApi } from '../lib/api'
+import { adminApi } from '../lib/api'
 import { useAuthStore } from '../lib/store'
+import { formatRupiah } from '../lib/utils'
+import { CONFIG } from '../lib/config'
 import * as XLSX from 'xlsx'
+
+// Harga per plan untuk estimasi pendapatan (dari CONFIG.TIERS)
+const PLAN_PRICES = {
+  starter: CONFIG.TIERS.STARTER.priceMonthlyNum || 49000,
+  pro: CONFIG.TIERS.PRO.priceMonthlyNum || 99000,
+  business: CONFIG.TIERS.BUSINESS.priceMonthlyNum || 249000,
+}
 
 export default function AdminPage() {
   const navigate = useNavigate()
-  const { logout, user } = useAuthStore()
+  const { logout, user, token } = useAuthStore()
   const [passcode, setPasscode] = useState('')
-  const [isAuthenticated, setIsAuthenticated] = useState(true) // Default unlocked for easy demo
-  const [activeTab, setActiveTab] = useState('sellers') // 'sellers', 'transactions', 'system', 'broadcast'
-  
-  // Data states
-  const [stats, setStats] = useState({ totalSellers: 1, proSellersCount: 1, totalPlatformGmv: 15400000 })
-  const [sellers, setSellers] = useState([
-    { id: 'sel_1', name: user?.name || 'Admin Exora', storeName: 'Toko Official Exora', slug: 'exora-official', email: user?.email || 'admin@exora.id', isPro: true, status: 'active', productsCount: 12, gmv: 15400000, joined: '2025-01-01' }
-  ])
+  const [isAuthenticated, setIsAuthenticated] = useState(true)
+  const [activeTab, setActiveTab] = useState('sellers')
+
+  // Data states - diinisialisasi kosong, diisi dari API
+  const [stats, setStats] = useState({
+    totalUser: 0,
+    totalToko: 0,
+    totalProduk: 0,
+    freeCount: 0,
+    starterCount: 0,
+    proCount: 0,
+    businessCount: 0,
+    expiredCount: 0,
+    totalPlatformGmv: 0,
+  })
+  const [sellers, setSellers] = useState([])
   const [logs, setLogs] = useState([])
   const [loading, setLoading] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
-  const [filterTier, setFilterTier] = useState('all') // 'all', 'pro', 'free', 'suspended'
+  const [filterPlan, setFilterPlan] = useState('all') // 'all', 'free', 'starter', 'pro', 'business', 'expired'
+
+  // Section management counts
+  const [sectionCounts, setSectionCounts] = useState({
+    blog: 0,
+    guides: 0,
+    help: 0,
+    updates: 0,
+    credentials: 0,
+  })
 
   // Modals
   const [selectedSeller, setSelectedSeller] = useState(null)
@@ -48,16 +75,45 @@ export default function AdminPage() {
       const [statsRes, sellersRes, logsRes] = await Promise.all([
         adminApi.getStats(token).catch(() => null),
         adminApi.getSellers(token).catch(() => null),
-        adminApi.getSystemLogs(token).catch(() => null)
+        adminApi.getSystemLogs(token).catch(() => null),
       ])
 
-      if (statsRes?.success && statsRes?.data) setStats(statsRes.data)
-      if (sellersRes?.success && sellersRes?.data?.length) setSellers(sellersRes.data)
-      if (logsRes?.success && logsRes?.data) setLogs(logsRes.data)
+      if (statsRes?.success && statsRes?.data) {
+        setStats(statsRes.data)
+      }
+      if (sellersRes?.success && Array.isArray(sellersRes.data)) {
+        setSellers(sellersRes.data)
+      }
+      if (logsRes?.success && logsRes?.data) {
+        setLogs(logsRes.data)
+      }
+
+      // Load section counts (non-blocking)
+      loadSectionCounts(token)
     } catch (err) {
       console.warn('Gagal memuat data admin:', err)
     } finally {
       setLoading(false)
+    }
+  }
+
+  const loadSectionCounts = async (token) => {
+    try {
+      // Fetch blog count
+      const blogRes = await fetch('/api/blog').then(r => r.json()).catch(() => null)
+      const guidesRes = await fetch('/api/guides').then(r => r.json()).catch(() => null)
+      const helpRes = await fetch('/api/help').then(r => r.json()).catch(() => null)
+      const updatesRes = await fetch('/api/updates').then(r => r.json()).catch(() => null)
+
+      setSectionCounts({
+        blog: Array.isArray(blogRes?.data) ? blogRes.data.length : 0,
+        guides: Array.isArray(guidesRes?.data) ? guidesRes.data.length : 0,
+        help: Array.isArray(helpRes?.data) ? helpRes.data.length : 0,
+        updates: Array.isArray(updatesRes?.data) ? updatesRes.data.length : 0,
+        credentials: 0, // Belum ada endpoint
+      })
+    } catch (err) {
+      console.warn('Gagal load section counts:', err)
     }
   }
 
@@ -67,7 +123,7 @@ export default function AdminPage() {
     navigate('/login')
   }
 
-  // Passcode verification if locked
+  // Passcode verification
   const handleVerifyPasscode = (e) => {
     e.preventDefault()
     if (passcode === 'admin123' || passcode === 'exora') {
@@ -78,12 +134,17 @@ export default function AdminPage() {
     }
   }
 
-  // Toggle PRO subscription
+  // Toggle PRO subscription - FIX: update item by id, bukan replace seluruh array
   const handleTogglePro = async (seller) => {
     try {
       const res = await adminApi.toggleProStatus(seller.id)
       if (res.success) {
-        setSellers(res.data)
+        // Update seller di state, bukan replace seluruh array
+        setSellers(prev => prev.map(s =>
+          s.id === seller.id
+            ? { ...s, isPro: res.data.isPro, plan: res.data.isPro ? 'pro' : 'free' }
+            : s
+        ))
         toast.success(`Status PRO ${seller.storeName} berhasil diperbarui! ✨`)
       }
     } catch (err) {
@@ -91,12 +152,16 @@ export default function AdminPage() {
     }
   }
 
-  // Toggle Store Active/Suspended
+  // Toggle Store Active/Suspended - FIX: update item by id
   const handleToggleSuspend = async (seller) => {
     try {
       const res = await adminApi.toggleStoreStatus(seller.id)
       if (res.success) {
-        setSellers(res.data)
+        setSellers(prev => prev.map(s =>
+          s.id === seller.id
+            ? { ...s, status: res.data.aktif ? 'active' : 'suspended' }
+            : s
+        ))
         toast.success(`Status toko ${seller.storeName} diperbarui!`)
       }
     } catch (err) {
@@ -111,7 +176,6 @@ export default function AdminPage() {
       toast.error('Judul dan isi pengumuman wajib diisi')
       return
     }
-
     toast.success(`Pengumuman berhasil disiarkan ke ${broadcastTarget === 'all' ? 'semua seller' : 'seller PRO'}! 📢`)
     setBroadcastTitle('')
     setBroadcastMessage('')
@@ -126,13 +190,12 @@ export default function AdminPage() {
       'Nama Toko': s.storeName,
       'URL Toko': `exora.app/toko/${s.slug}`,
       Email: s.email,
-      'Paket Subscription': s.isPro ? 'PRO TIER' : 'FREE',
+      'Paket Subscription': s.plan?.toUpperCase() || (s.isPro ? 'PRO' : 'FREE'),
       'Status Akun': s.status.toUpperCase(),
       'Total Produk': s.productsCount,
       'Akumulasi GMV (Rp)': s.gmv,
-      'Tanggal Bergabung': s.joined
+      'Tanggal Bergabung': s.joined,
     }))
-
     const ws = XLSX.utils.json_to_sheet(exportData)
     const wb = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(wb, ws, 'Platform Sellers Audit')
@@ -140,7 +203,7 @@ export default function AdminPage() {
     toast.success('Laporan Audit Platform berhasil diunduh 📄')
   }
 
-  // Filtered Sellers
+  // Filtered Sellers - FIX: pakai field `plan` bukan `isPro`
   const filteredSellers = useMemo(() => {
     return sellers.filter(s => {
       const matchesSearch = !searchQuery ||
@@ -149,17 +212,41 @@ export default function AdminPage() {
         s.email.toLowerCase().includes(searchQuery.toLowerCase()) ||
         s.slug.toLowerCase().includes(searchQuery.toLowerCase())
 
-      let matchesTier = true
-      if (filterTier === 'pro') matchesTier = s.isPro
-      if (filterTier === 'free') matchesTier = !s.isPro
-      if (filterTier === 'suspended') matchesTier = s.status === 'suspended'
+      let matchesPlan = true
+      if (filterPlan === 'free') matchesPlan = s.plan === 'free'
+      if (filterPlan === 'starter') matchesPlan = s.plan === 'starter'
+      if (filterPlan === 'pro') matchesPlan = s.plan === 'pro'
+      if (filterPlan === 'business') matchesPlan = s.plan === 'business'
+      if (filterPlan === 'expired') matchesPlan = s.plan === 'expired'
 
-      return matchesSearch && matchesTier
+      return matchesSearch && matchesPlan
     })
-  }, [sellers, searchQuery, filterTier])
+  }, [sellers, searchQuery, filterPlan])
 
-  const formatRupiah = (val) => {
-    return new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(val || 0)
+  // Revenue calculation
+  const estimatedRevenue = useMemo(() => {
+    return (
+      (stats.starterCount || 0) * PLAN_PRICES.starter +
+      (stats.proCount || 0) * PLAN_PRICES.pro +
+      (stats.businessCount || 0) * PLAN_PRICES.business
+    )
+  }, [stats])
+
+  // Helper: hitung hari sampai expired
+  const getDaysUntilExpiry = (expiryIso) => {
+    if (!expiryIso) return null
+    const expiry = new Date(expiryIso)
+    const now = new Date()
+    const diff = expiry.getTime() - now.getTime()
+    const days = Math.ceil(diff / (1000 * 60 * 60 * 24))
+    return days
+  }
+
+  const formatDaysLeft = (days) => {
+    if (days === null) return null
+    if (days < 0) return `Expired ${Math.abs(days)} hari lalu`
+    if (days === 0) return 'Expire hari ini'
+    return `${days} hari lagi`
   }
 
   // Unauthenticated Login Guard View
@@ -182,14 +269,12 @@ export default function AdminPage() {
           }}>
             <ShieldAlert size={28} />
           </div>
-
           <h2 style={{ fontSize: '1.4rem', fontWeight: 800, margin: '0 0 8px' }}>
             Akses Terkunci Admin
           </h2>
           <p style={{ color: 'var(--text-secondary)', fontSize: '0.88rem', marginBottom: 24 }}>
             Masukkan PIN Superadmin Exora Platform untuk mengakses dasbor kontrol internal.
           </p>
-
           <form onSubmit={handleVerifyPasscode}>
             <input
               type="password"
@@ -207,7 +292,6 @@ export default function AdminPage() {
               Buka Akses Admin <Lock size={16} />
             </button>
           </form>
-
           <div style={{ marginTop: 20 }}>
             <Link to="/seller" style={{ fontSize: '0.82rem', color: 'var(--text-tertiary)', textDecoration: 'none' }}>
               ← Kembali ke Seller Dashboard
@@ -255,7 +339,6 @@ export default function AdminPage() {
               <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>Sistem Kontrol Platform & Pengawasan Seller</div>
             </div>
           </div>
-
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
             <button onClick={loadAdminData} className="btn btn-ghost btn-sm" style={{ gap: 6, color: '#94a3b8' }}>
               <RefreshCw size={14} className={loading ? 'animate-spin' : ''} /> Sync Data
@@ -266,7 +349,7 @@ export default function AdminPage() {
             <Link to="/" className="btn btn-ghost btn-sm" style={{ color: '#94a3b8', gap: 6 }}>
               <Globe size={15} /> Landing Page
             </Link>
-            <Link to="/seller" className="btn btn-ghost btn-sm" style={{ color: '#38bdf8', gap: 6 }}>
+            <Link to="/dashboard" className="btn btn-ghost btn-sm" style={{ color: '#38bdf8', gap: 6 }}>
               <Store size={15} /> Dashboard Seller
             </Link>
             <button onClick={handleLogout} className="btn btn-sm" style={{ gap: 6, background: '#ef4444', color: '#fff', border: 'none', padding: '6px 14px', borderRadius: 8, fontWeight: 600, cursor: 'pointer' }}>
@@ -278,65 +361,133 @@ export default function AdminPage() {
 
       {/* --- MAIN CONTAINER --- */}
       <main style={{ maxWidth: 1280, margin: '0 auto', padding: '28px 24px 60px', display: 'flex', flexDirection: 'column', gap: 24 }}>
-        
-        {/* --- PLATFORM STATS OVERVIEW --- */}
-        {stats && (
-          <div style={{
-            display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 16
-          }}>
-            <div style={{ background: '#141722', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 18, padding: 20 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', color: '#94a3b8', fontSize: '0.82rem', marginBottom: 10 }}>
-                <span>Total Toko Registered</span>
-                <Store size={18} style={{ color: '#38bdf8' }} />
-              </div>
-              <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#fff', marginBottom: 4 }}>
-                {stats.totalSellers} <span style={{ fontSize: '0.85rem', color: '#38bdf8', fontWeight: 600 }}>Toko</span>
-              </div>
-              <div style={{ fontSize: '0.78rem', color: '#10b981' }}>
-                <span style={{ fontWeight: 700 }}>{stats.proSellersCount} Toko</span> Langganan PRO Tier
-              </div>
+        {/* --- PLATFORM STATS OVERVIEW (7 Cards) --- */}
+        <div style={{
+          display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 16
+        }}>
+          {/* Total Seller */}
+          <div style={{ background: '#141722', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 18, padding: 20 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', color: '#94a3b8', fontSize: '0.78rem', marginBottom: 10 }}>
+              <span>TOTAL SELLER</span>
+              <Users size={18} style={{ color: '#38bdf8' }} />
             </div>
-
-            <div style={{ background: '#141722', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 18, padding: 20 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', color: '#94a3b8', fontSize: '0.82rem', marginBottom: 10 }}>
-                <span>Total Platform GMV</span>
-                <DollarSign size={18} style={{ color: '#10b981' }} />
-              </div>
-              <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#fff', marginBottom: 4 }}>
-                {formatRupiah(stats.totalPlatformGmv)}
-              </div>
-              <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>
-                Akumulasi seluruh checkout toko
-              </div>
+            <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#38bdf8', marginBottom: 4 }}>
+              {stats.totalUser || 0}
             </div>
+          </div>
 
-            <div style={{ background: '#141722', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 18, padding: 20 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', color: '#94a3b8', fontSize: '0.82rem', marginBottom: 10 }}>
-                <span>Kesehatan Gateway WA</span>
-                <Server size={18} style={{ color: '#a855f7' }} />
-              </div>
-              <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#10b981', marginBottom: 4 }}>
-                {stats.serverHealth}
-              </div>
-              <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>
-                {stats.activeGateway}
-              </div>
+          {/* Free */}
+          <div style={{ background: '#141722', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 18, padding: 20 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', color: '#94a3b8', fontSize: '0.78rem', marginBottom: 10 }}>
+              <span>FREE</span>
+              <Users size={18} style={{ color: '#64748b' }} />
             </div>
+            <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#94a3b8', marginBottom: 4 }}>
+              {stats.freeCount || 0}
+            </div>
+          </div>
 
-            <div style={{ background: '#141722', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 18, padding: 20 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', color: '#94a3b8', fontSize: '0.82rem', marginBottom: 10 }}>
-                <span>Total Produk Platform</span>
-                <Zap size={18} style={{ color: '#f59e0b' }} />
+          {/* Starter */}
+          <div style={{ background: '#141722', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 18, padding: 20 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', color: '#94a3b8', fontSize: '0.78rem', marginBottom: 10 }}>
+              <span>STARTER</span>
+              <Sparkles size={18} style={{ color: '#3b82f6' }} />
+            </div>
+            <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#3b82f6', marginBottom: 4 }}>
+              {stats.starterCount || 0}
+            </div>
+          </div>
+
+          {/* Pro */}
+          <div style={{ background: '#141722', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 18, padding: 20 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', color: '#94a3b8', fontSize: '0.78rem', marginBottom: 10 }}>
+              <span>PRO</span>
+              <Zap size={18} style={{ color: '#a855f7' }} />
+            </div>
+            <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#a855f7', marginBottom: 4 }}>
+              {stats.proCount || 0}
+            </div>
+          </div>
+
+          {/* Business */}
+          <div style={{ background: '#141722', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 18, padding: 20 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', color: '#94a3b8', fontSize: '0.78rem', marginBottom: 10 }}>
+              <span>BUSINESS</span>
+              <Crown size={18} style={{ color: '#10b981' }} />
+            </div>
+            <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#10b981', marginBottom: 4 }}>
+              {stats.businessCount || 0}
+            </div>
+          </div>
+
+          {/* Expired */}
+          <div style={{ background: '#141722', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 18, padding: 20 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', color: '#94a3b8', fontSize: '0.78rem', marginBottom: 10 }}>
+              <span>EXPIRED</span>
+              <Clock size={18} style={{ color: '#ef4444' }} />
+            </div>
+            <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#ef4444', marginBottom: 4 }}>
+              {stats.expiredCount || 0}
+            </div>
+          </div>
+
+          {/* Total Toko */}
+          <div style={{ background: '#141722', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 18, padding: 20 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', color: '#94a3b8', fontSize: '0.78rem', marginBottom: 10 }}>
+              <span>TOTAL TOKO</span>
+              <Store size={18} style={{ color: '#10b981' }} />
+            </div>
+            <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#10b981', marginBottom: 4 }}>
+              {stats.totalToko || 0}
+            </div>
+          </div>
+
+          {/* Total Produk */}
+          <div style={{ background: '#141722', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 18, padding: 20 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', color: '#94a3b8', fontSize: '0.78rem', marginBottom: 10 }}>
+              <span>TOTAL PRODUK</span>
+              <FileText size={18} style={{ color: '#f59e0b' }} />
+            </div>
+            <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#f59e0b', marginBottom: 4 }}>
+              {stats.totalProduk || 0}
+            </div>
+          </div>
+        </div>
+
+        {/* --- REVENUE BANNER --- */}
+        <div style={{
+          background: 'linear-gradient(135deg, rgba(91,138,245,0.1) 0%, rgba(167,139,250,0.1) 100%)',
+          border: '1px solid rgba(167,139,250,0.2)',
+          borderRadius: 18,
+          padding: '20px 24px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          flexWrap: 'wrap',
+          gap: 16,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div style={{
+              width: 44, height: 44, borderRadius: 12,
+              background: 'rgba(91,138,245,0.2)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              color: '#5b8af5',
+            }}>
+              <ArrowUpRight size={22} />
+            </div>
+            <div>
+              <div style={{ fontSize: '0.75rem', color: '#94a3b8', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                ESTIMASI PENDAPATAN PLATFORM
               </div>
-              <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#fff', marginBottom: 4 }}>
-                {stats.totalProductsCount} <span style={{ fontSize: '0.85rem', color: '#94a3b8', fontWeight: 500 }}>SKU</span>
-              </div>
-              <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>
-                Penyimpanan: {stats.storageUsed}
+              <div style={{ fontSize: '1.5rem', fontWeight: 800, color: '#fff' }}>
+                {formatRupiah(estimatedRevenue)}<span style={{ fontSize: '0.9rem', color: '#94a3b8', fontWeight: 500 }}>/bulan</span>
               </div>
             </div>
           </div>
-        )}
+          <div style={{ fontSize: '0.85rem', color: '#cbd5e1' }}>
+            {stats.businessCount || 0} Business × {formatRupiah(PLAN_PRICES.business)} + {stats.proCount || 0} Pro × {formatRupiah(PLAN_PRICES.pro)} + {stats.starterCount || 0} Starter × {formatRupiah(PLAN_PRICES.starter)}
+          </div>
+        </div>
 
         {/* --- NAVIGATION TABS --- */}
         <div style={{
@@ -379,7 +530,7 @@ export default function AdminPage() {
         {/* --- TAB 1: SELLERS MANAGEMENT --- */}
         {activeTab === 'sellers' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            {/* Filters Bar */}
+            {/* Filters Bar - Plan-based */}
             <div style={{
               display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12,
               background: '#141722', padding: 16, borderRadius: 16, border: '1px solid rgba(255,255,255,0.08)'
@@ -395,25 +546,32 @@ export default function AdminPage() {
                   style={{ width: '100%', paddingLeft: 40, height: 40, borderRadius: 10, background: '#0b0d14', fontSize: '0.85rem' }}
                 />
               </div>
-
               <div style={{ display: 'flex', gap: 8 }}>
                 {[
-                  { id: 'all', label: 'Semua Status' },
-                  { id: 'pro', label: 'PRO Tier' },
-                  { id: 'free', label: 'Free' },
-                  { id: 'suspended', label: 'Suspended' },
+                  { id: 'all', label: 'Semua', count: sellers.length },
+                  { id: 'free', label: 'Gratis', count: stats.freeCount || 0 },
+                  { id: 'starter', label: '⭐ Starter', count: stats.starterCount || 0 },
+                  { id: 'pro', label: ' Pro', count: stats.proCount || 0 },
+                  { id: 'business', label: '👑 Business', count: stats.businessCount || 0 },
                 ].map(f => (
                   <button
                     key={f.id}
-                    onClick={() => setFilterTier(f.id)}
+                    onClick={() => setFilterPlan(f.id)}
                     style={{
                       padding: '6px 12px', borderRadius: 8, fontSize: '0.78rem', fontWeight: 600,
-                      background: filterTier === f.id ? '#38bdf8' : '#0b0d14',
-                      color: filterTier === f.id ? '#0f172a' : '#94a3b8',
-                      border: '1px solid rgba(255,255,255,0.08)', cursor: 'pointer'
+                      background: filterPlan === f.id ? '#38bdf8' : '#0b0d14',
+                      color: filterPlan === f.id ? '#0f172a' : '#94a3b8',
+                      border: '1px solid rgba(255,255,255,0.08)', cursor: 'pointer',
+                      display: 'flex', alignItems: 'center', gap: 6,
                     }}
                   >
                     {f.label}
+                    <span style={{
+                      background: filterPlan === f.id ? 'rgba(0,0,0,0.15)' : 'rgba(255,255,255,0.1)',
+                      padding: '2px 6px', borderRadius: 100, fontSize: '0.7rem',
+                    }}>
+                      {f.count}
+                    </span>
                   </button>
                 ))}
               </div>
@@ -436,102 +594,111 @@ export default function AdminPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredSellers.map(seller => (
-                      <tr key={seller.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)', transition: 'background 0.2s' }}>
-                        <td style={{ padding: '14px 18px' }}>
-                          <div style={{ fontWeight: 700, color: '#fff', fontSize: '0.9rem' }}>{seller.storeName}</div>
-                          <div style={{ fontSize: '0.75rem', color: '#94a3b8', display: 'flex', alignItems: 'center', gap: 6 }}>
-                            <span>{seller.name}</span> • <span>{seller.email}</span>
-                          </div>
-                          <a
-                            href={`/toko/${seller.slug}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            style={{ color: '#38bdf8', fontSize: '0.72rem', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 4, marginTop: 2 }}
-                          >
-                            exora.app/toko/{seller.slug} <ExternalLink size={10} />
-                          </a>
-                        </td>
+                    {filteredSellers.map(seller => {
+                      const daysLeft = getDaysUntilExpiry(seller.planExpiry)
+                      const planLabel = seller.plan?.toUpperCase() || (seller.isPro ? 'PRO' : 'FREE')
+                      const planColor = {
+                        free: '#94a3b8',
+                        starter: '#3b82f6',
+                        pro: '#a855f7',
+                        business: '#10b981',
+                        expired: '#ef4444',
+                      }[seller.plan] || '#94a3b8'
 
-                        <td style={{ padding: '14px 18px' }}>
-                          {seller.isPro ? (
+                      return (
+                        <tr key={seller.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)', transition: 'background 0.2s' }}>
+                          <td style={{ padding: '14px 18px' }}>
+                            <div style={{ fontWeight: 700, color: '#fff', fontSize: '0.9rem' }}>{seller.storeName}</div>
+                            <div style={{ fontSize: '0.75rem', color: '#94a3b8', display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <span>{seller.name}</span> • <span>{seller.email}</span>
+                            </div>
+                            <a
+                              href={`/toko/${seller.slug}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              style={{ color: '#38bdf8', fontSize: '0.72rem', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 4, marginTop: 2 }}
+                            >
+                              exora.app/toko/{seller.slug} <ExternalLink size={10} />
+                            </a>
+                          </td>
+                          <td style={{ padding: '14px 18px' }}>
                             <span style={{
                               padding: '4px 10px', borderRadius: 100, fontSize: '0.72rem', fontWeight: 800,
-                              background: 'rgba(168, 85, 247, 0.2)', color: '#c084fc', border: '1px solid rgba(168, 85, 247, 0.4)',
-                              display: 'inline-flex', alignItems: 'center', gap: 4
+                              background: `${planColor}20`, color: planColor, border: `1px solid ${planColor}40`,
+                              display: 'inline-flex', alignItems: 'center', gap: 4,
+                              marginBottom: daysLeft !== null ? 4 : 0,
                             }}>
-                              <Zap size={12} /> PRO TIER
+                              {seller.plan === 'business' && <Crown size={12} />}
+                              {seller.plan === 'pro' && <Zap size={12} />}
+                              {seller.plan === 'starter' && <Sparkles size={12} />}
+                              {planLabel}
                             </span>
-                          ) : (
-                            <span style={{
-                              padding: '4px 10px', borderRadius: 100, fontSize: '0.72rem', fontWeight: 600,
-                              background: 'rgba(148, 163, 184, 0.15)', color: '#94a3b8', border: '1px solid rgba(148, 163, 184, 0.2)'
-                            }}>
-                              FREE PLAN
-                            </span>
-                          )}
-                        </td>
-
-                        <td style={{ padding: '14px 18px', fontWeight: 700, color: '#10b981' }}>
-                          {formatRupiah(seller.gmv)}
-                        </td>
-
-                        <td style={{ padding: '14px 18px', color: '#cbd5e1' }}>
-                          {seller.productsCount} Item
-                        </td>
-
-                        <td style={{ padding: '14px 18px' }}>
-                          {seller.status === 'active' ? (
-                            <span style={{ color: '#10b981', fontSize: '0.78rem', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                              <CheckCircle2 size={13} /> Aktif
-                            </span>
-                          ) : (
-                            <span style={{ color: '#ef4444', fontSize: '0.78rem', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                              <AlertTriangle size={13} /> Suspended
-                            </span>
-                          )}
-                        </td>
-
-                        <td style={{ padding: '14px 18px', textAlign: 'right' }}>
-                          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-                            <button
-                              onClick={() => handleTogglePro(seller)}
-                              className="btn btn-sm"
-                              style={{
-                                fontSize: '0.72rem', padding: '4px 10px',
-                                background: seller.isPro ? 'rgba(239, 68, 68, 0.15)' : 'rgba(168, 85, 247, 0.15)',
-                                color: seller.isPro ? '#f87171' : '#c084fc',
-                                border: 'none', borderRadius: 6, cursor: 'pointer'
-                              }}
-                              title={seller.isPro ? 'Downgrade ke Free' : 'Upgrade ke PRO'}
-                            >
-                              {seller.isPro ? 'Set Free' : 'Set PRO'}
-                            </button>
-
-                            <button
-                              onClick={() => handleToggleSuspend(seller)}
-                              className="btn btn-sm"
-                              style={{
-                                fontSize: '0.72rem', padding: '4px 10px',
-                                background: seller.status === 'active' ? 'rgba(239, 68, 68, 0.15)' : 'rgba(16, 185, 129, 0.15)',
-                                color: seller.status === 'active' ? '#f87171' : '#34d399',
-                                border: 'none', borderRadius: 6, cursor: 'pointer'
-                              }}
-                            >
-                              {seller.status === 'active' ? 'Suspend' : 'Aktifkan'}
-                            </button>
-
-                            <button
-                              onClick={() => setSelectedSeller(seller)}
-                              className="btn btn-sm"
-                              style={{ fontSize: '0.72rem', padding: '4px 8px', background: '#1e293b', color: '#94a3b8', border: 'none', borderRadius: 6 }}
-                            >
-                              Detail
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
+                            {daysLeft !== null && seller.plan !== 'free' && (
+                              <div style={{
+                                fontSize: '0.68rem',
+                                color: daysLeft < 0 ? '#ef4444' : daysLeft <= 7 ? '#f59e0b' : '#10b981',
+                                fontWeight: 600,
+                              }}>
+                                {formatDaysLeft(daysLeft)}
+                              </div>
+                            )}
+                          </td>
+                          <td style={{ padding: '14px 18px', fontWeight: 700, color: '#10b981' }}>
+                            {formatRupiah(seller.gmv)}
+                          </td>
+                          <td style={{ padding: '14px 18px', color: '#cbd5e1' }}>
+                            {seller.productsCount} Item
+                          </td>
+                          <td style={{ padding: '14px 18px' }}>
+                            {seller.status === 'active' ? (
+                              <span style={{ color: '#10b981', fontSize: '0.78rem', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                                <CheckCircle2 size={13} /> Aktif
+                              </span>
+                            ) : (
+                              <span style={{ color: '#ef4444', fontSize: '0.78rem', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                                <AlertTriangle size={13} /> Suspended
+                              </span>
+                            )}
+                          </td>
+                          <td style={{ padding: '14px 18px', textAlign: 'right' }}>
+                            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                              <button
+                                onClick={() => handleTogglePro(seller)}
+                                className="btn btn-sm"
+                                style={{
+                                  fontSize: '0.72rem', padding: '4px 10px',
+                                  background: seller.isPro ? 'rgba(239, 68, 68, 0.15)' : 'rgba(168, 85, 247, 0.15)',
+                                  color: seller.isPro ? '#f87171' : '#c084fc',
+                                  border: 'none', borderRadius: 6, cursor: 'pointer'
+                                }}
+                                title={seller.isPro ? 'Downgrade ke Free' : 'Upgrade ke PRO'}
+                              >
+                                {seller.isPro ? 'Set Free' : 'Set PRO'}
+                              </button>
+                              <button
+                                onClick={() => handleToggleSuspend(seller)}
+                                className="btn btn-sm"
+                                style={{
+                                  fontSize: '0.72rem', padding: '4px 10px',
+                                  background: seller.status === 'active' ? 'rgba(239, 68, 68, 0.15)' : 'rgba(16, 185, 129, 0.15)',
+                                  color: seller.status === 'active' ? '#f87171' : '#34d399',
+                                  border: 'none', borderRadius: 6, cursor: 'pointer'
+                                }}
+                              >
+                                {seller.status === 'active' ? 'Suspend' : 'Aktifkan'}
+                              </button>
+                              <button
+                                onClick={() => setSelectedSeller(seller)}
+                                className="btn btn-sm"
+                                style={{ fontSize: '0.72rem', padding: '4px 8px', background: '#1e293b', color: '#94a3b8', border: 'none', borderRadius: 6 }}
+                              >
+                                Detail
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      )
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -546,7 +713,6 @@ export default function AdminPage() {
               <h3 style={{ fontSize: '1.05rem', fontWeight: 800, margin: '0 0 16px', display: 'flex', alignItems: 'center', gap: 8, color: '#fff' }}>
                 <Cpu size={18} style={{ color: '#38bdf8' }} /> Status Infrastruktur Cloud
               </h3>
-
               <div style={{ display: 'flex', flexDirection: 'column', gap: 14, fontSize: '0.85rem' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', paddingBottom: 10, borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
                   <span style={{ color: '#94a3b8' }}>WhatsApp Cloud Gateway API:</span>
@@ -566,12 +732,10 @@ export default function AdminPage() {
                 </div>
               </div>
             </div>
-
             <div style={{ background: '#141722', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 18, padding: 24 }}>
               <h3 style={{ fontSize: '1.05rem', fontWeight: 800, margin: '0 0 16px', display: 'flex', alignItems: 'center', gap: 8, color: '#fff' }}>
                 <FileText size={18} style={{ color: '#a855f7' }} /> Audit System Logs Terakhir
               </h3>
-
               <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                 {logs.map(log => (
                   <div key={log.id} style={{
@@ -579,10 +743,10 @@ export default function AdminPage() {
                     fontSize: '0.8rem'
                   }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 700, color: '#fff', marginBottom: 2 }}>
-                      <span>{log.event}</span>
-                      <span style={{ color: '#64748b', fontSize: '0.72rem' }}>{log.time}</span>
+                      <span>{log.event || log.type}</span>
+                      <span style={{ color: '#64748b', fontSize: '0.72rem' }}>{log.time || new Date(log.timestamp).toLocaleString('id-ID')}</span>
                     </div>
-                    <div style={{ color: '#94a3b8', fontSize: '0.75rem' }}>{log.details}</div>
+                    <div style={{ color: '#94a3b8', fontSize: '0.75rem' }}>{log.details || log.message}</div>
                   </div>
                 ))}
               </div>
@@ -599,7 +763,6 @@ export default function AdminPage() {
             <p style={{ color: '#94a3b8', fontSize: '0.85rem', marginBottom: 20 }}>
               Pesan ini akan ditampilkan pada banner dasbor seller yang terdaftar.
             </p>
-
             <form onSubmit={handleSendBroadcast} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
               <div>
                 <label style={{ fontSize: '0.8rem', fontWeight: 700, color: '#cbd5e1', marginBottom: 6, display: 'block' }}>
@@ -615,7 +778,6 @@ export default function AdminPage() {
                   <option value="pro">Khusus Seller PRO Tier</option>
                 </select>
               </div>
-
               <div>
                 <label style={{ fontSize: '0.8rem', fontWeight: 700, color: '#cbd5e1', marginBottom: 6, display: 'block' }}>
                   Judul Pengumuman
@@ -629,7 +791,6 @@ export default function AdminPage() {
                   style={{ width: '100%', height: 42, background: '#0b0d14', borderRadius: 10 }}
                 />
               </div>
-
               <div>
                 <label style={{ fontSize: '0.8rem', fontWeight: 700, color: '#cbd5e1', marginBottom: 6, display: 'block' }}>
                   Isi Pengumuman / Pesan Update
@@ -643,7 +804,6 @@ export default function AdminPage() {
                   style={{ width: '100%', padding: 12, background: '#0b0d14', borderRadius: 10, fontSize: '0.88rem' }}
                 />
               </div>
-
               <button type="submit" className="btn btn-primary" style={{ gap: 8, height: 44, marginTop: 8 }}>
                 Siarkan Sekarang <Send size={15} />
               </button>
@@ -651,6 +811,59 @@ export default function AdminPage() {
           </div>
         )}
 
+        {/* --- SECTION MANAGEMENT (Seller Hub, Panduan, Bantuan, Updates, Kredensial) --- */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {[
+            { icon: BookOpen, label: 'Seller Hub / Blog', count: sectionCounts.blog, color: '#3b82f6', link: '/blog' },
+            { icon: FileText, label: 'Panduan / Tutorial', count: sectionCounts.guides, color: '#10b981', link: '/guides' },
+            { icon: HelpCircle, label: 'Pusat Bantuan', count: sectionCounts.help, color: '#a855f7', link: '/help' },
+            { icon: RefreshCcw, label: 'Update Fitur / Changelog', count: sectionCounts.updates, color: '#f59e0b', link: '/updates' },
+            { icon: Key, label: 'Integrasi & Kredensial', count: sectionCounts.credentials, color: '#ef4444', link: null },
+          ].map((section, idx) => {
+            const Icon = section.icon
+            return (
+              <div
+                key={idx}
+                style={{
+                  background: '#141722',
+                  border: '1px solid rgba(255,255,255,0.08)',
+                  borderRadius: 18,
+                  padding: '18px 24px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 16,
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+                  <div style={{
+                    width: 42, height: 42, borderRadius: 12,
+                    background: `${section.color}15`,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    color: section.color,
+                  }}>
+                    <Icon size={20} />
+                  </div>
+                  <div>
+                    <div style={{ fontSize: '0.95rem', fontWeight: 700, color: '#fff' }}>{section.label}</div>
+                    <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>{section.count} {section.label.includes('Blog') ? 'artikel' : section.label.includes('Panduan') ? 'panduan' : section.label.includes('Bantuan') ? 'artikel' : section.label.includes('Update') ? 'update' : 'kredensial'}</div>
+                  </div>
+                </div>
+                {section.link ? (
+                  <Link
+                    to={section.link}
+                    className="btn btn-secondary btn-sm"
+                    style={{ gap: 6 }}
+                  >
+                    Lihat <ChevronRight size={14} />
+                  </Link>
+                ) : (
+                  <span style={{ fontSize: '0.78rem', color: '#64748b' }}>Segera hadir</span>
+                )}
+              </div>
+            )
+          })}
+        </div>
       </main>
 
       {/* --- SELLER DETAIL MODAL --- */}
@@ -682,26 +895,28 @@ export default function AdminPage() {
                   ✕
                 </button>
               </div>
-
               <div style={{ display: 'flex', flexDirection: 'column', gap: 12, fontSize: '0.88rem' }}>
                 <div style={{ background: '#0e1017', padding: 14, borderRadius: 12 }}>
                   <div style={{ fontWeight: 800, color: '#fff', fontSize: '1rem' }}>{selectedSeller.storeName}</div>
                   <div style={{ color: '#94a3b8', fontSize: '0.8rem' }}>Owner: {selectedSeller.name} ({selectedSeller.email})</div>
                 </div>
-
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                   <div style={{ background: '#0e1017', padding: 12, borderRadius: 10 }}>
                     <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>Status Paket</div>
-                    <div style={{ fontWeight: 700, color: selectedSeller.isPro ? '#c084fc' : '#fff' }}>
-                      {selectedSeller.isPro ? 'PRO TIER' : 'FREE PLAN'}
+                    <div style={{ fontWeight: 700, color: '#a855f7' }}>
+                      {selectedSeller.plan?.toUpperCase() || (selectedSeller.isPro ? 'PRO' : 'FREE')}
                     </div>
+                    {selectedSeller.planExpiry && (
+                      <div style={{ fontSize: '0.72rem', color: '#64748b', marginTop: 4 }}>
+                        Exp: {new Date(selectedSeller.planExpiry).toLocaleDateString('id-ID')}
+                      </div>
+                    )}
                   </div>
                   <div style={{ background: '#0e1017', padding: 12, borderRadius: 10 }}>
                     <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>Total GMV Toko</div>
                     <div style={{ fontWeight: 700, color: '#10b981' }}>{formatRupiah(selectedSeller.gmv)}</div>
                   </div>
                 </div>
-
                 <div style={{ background: '#0e1017', padding: 12, borderRadius: 10 }}>
                   <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginBottom: 2 }}>Link Public Storefront</div>
                   <a
@@ -714,7 +929,6 @@ export default function AdminPage() {
                   </a>
                 </div>
               </div>
-
               <div style={{ marginTop: 24, display: 'flex', gap: 10 }}>
                 <button
                   onClick={() => setSelectedSeller(null)}
