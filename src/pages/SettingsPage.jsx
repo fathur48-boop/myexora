@@ -13,24 +13,6 @@ import toast from 'react-hot-toast'
 const CLOUDINARY_CLOUD = 'dgplz1pd0'
 const CLOUDINARY_PRESET = 'tokoku'
 
-const DEFAULT_DEMO_TOKO = {
-  id: 'toko-exora-demo',
-  nama: 'Exora Official Store',
-  slug: 'exora-official',
-  deskripsi: 'Pusat belanja produk original berkualitas tinggi dengan garansi kepuasan 100% & pengiriman kilat.',
-  wa: '083862720514',
-  logo: 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=200&auto=format&fit=crop&q=80',
-  customDomain: '',
-  musik: '',
-  video: '',
-  pengumuman: '🎉 Promo Spesial Minggu Ini: Diskon up to 30% & Gratis Ongkir ke seluruh Indonesia!',
-  originAreaId: '3174',
-  originAreaLabel: 'Jakarta Selatan, DKI Jakarta',
-  paymentMethodsEnabled: ['manual', 'midtrans_instant', 'midtrans_escrow'],
-  tema: 'default',
-  layoutTemplate: 'classic',
-}
-
 async function uploadLogoToCloudinary(file) {
   const compressed = await compressImage(file, 400, 0.85)
   const formData = new FormData()
@@ -50,41 +32,20 @@ async function uploadLogoToCloudinary(file) {
 export default function SettingsPage() {
   const { user, token } = useAuthStore()
   const tokenObj = token
-  const { toko: storeToko, setToko } = useTokoStore()
-  const toko = storeToko || DEFAULT_DEMO_TOKO
+  const { toko, setToko, load: loadToko } = useTokoStore()
 
   const [tab, setTab] = useState('toko')
   const [mobileDropdownOpen, setMobileDropdownOpen] = useState(false)
+  const [tokoLoading, setTokoLoading] = useState(true)
 
   // 4-tier logic
   const tierLevel = getTierLevel(user?.plan)
   const planName = getPlanDisplayName(user?.plan)
-  const canAccessProFeatures = tierLevel >= 2 || true // Enabled for demo
+  const canAccessProFeatures = tierLevel >= 2
 
   // Voucher state
-  const [vouchers, setVouchers] = useState([
-    {
-      id: 'vouch_1',
-      kode: 'EXORAMINGGU',
-      tipe: 'persen',
-      nilai: 15,
-      minBelanja: 100000,
-      maksDiskon: 30000,
-      kuota: 50,
-      terpakai: 12,
-      berlakuSampai: new Date(Date.now() + 1000 * 60 * 60 * 24 * 14).toISOString(),
-    },
-    {
-      id: 'vouch_2',
-      kode: 'ONGKIRFREE',
-      tipe: 'nominal',
-      nilai: 20000,
-      minBelanja: 150000,
-      kuota: 100,
-      terpakai: 48,
-      berlakuSampai: new Date(Date.now() + 1000 * 60 * 60 * 24 * 30).toISOString(),
-    }
-  ])
+  const [vouchers, setVouchers] = useState([])
+  const [vouchersLoading, setVouchersLoading] = useState(true)
   const [showVoucherForm, setShowVoucherForm] = useState(false)
   const [voucherKode, setVoucherKode] = useState('')
   const [voucherTipe, setVoucherTipe] = useState('persen')
@@ -97,20 +58,25 @@ export default function SettingsPage() {
   const [voucherError, setVoucherError] = useState('')
 
   useEffect(() => {
-    if (token && !storeToko) {
-      tokoApi.getMine(tokenObj).then(res => {
-        if (res.data) setToko(res.data)
-      }).catch(() => {})
-    }
-  }, [token, storeToko])
+    let active = true
+    setTokoLoading(true)
+    loadToko(token).finally(() => {
+      if (active) setTokoLoading(false)
+    })
+    return () => { active = false }
+  }, [token])
 
   const loadVouchers = async () => {
+    setVouchersLoading(true)
     try {
       const res = await voucherApi.getMine(token)
-      if (res.success && Array.isArray(res.data) && res.data.length > 0) {
+      if (res.success && Array.isArray(res.data)) {
         setVouchers(res.data)
       }
-    } catch {}
+    } catch (e) {
+      console.error('Gagal memuat voucher:', e)
+    }
+    setVouchersLoading(false)
   }
 
   useEffect(() => {
@@ -126,21 +92,26 @@ export default function SettingsPage() {
     setVoucherLoading(true)
     setVoucherError('')
     try {
-      const newV = {
-        id: 'vouch_' + Date.now(),
+      const payload = {
         kode: voucherKode.trim().toUpperCase(),
         tipe: voucherTipe,
         nilai: Number(voucherNilai),
         minBelanja: voucherMinBelanja ? Number(voucherMinBelanja) : null,
         maksDiskon: voucherMaksDiskon ? Number(voucherMaksDiskon) : null,
         kuota: voucherKuota ? Number(voucherKuota) : null,
-        terpakai: 0,
         berlakuSampai: voucherBerlakuSampai ? new Date(voucherBerlakuSampai).toISOString() : null,
       }
-      try {
-        await voucherApi.create(token, newV)
-      } catch {}
-      setVouchers(prev => [newV, ...prev])
+      // Tidak ada catch{} di sini — kalau backend nolak (misal requirePro,
+      // kode duplikat), errornya harus nyampe ke catch di bawah, bukan
+      // ditelen diam-diam sambil tetap nampilin toast sukses.
+      const res = await voucherApi.create(token, payload)
+      // Pakai voucher hasil dari server (punya id asli dari DB), bukan
+      // objek lokal — supaya delete nanti ngirim id yang bener-bener match.
+      if (res?.data) {
+        setVouchers(prev => [res.data, ...prev])
+      } else {
+        await loadVouchers()
+      }
       setShowVoucherForm(false)
       setVoucherKode('')
       setVoucherNilai('')
@@ -158,10 +129,14 @@ export default function SettingsPage() {
   const handleDeleteVoucher = async (voucherId) => {
     if (!confirm('Hapus voucher ini?')) return
     try {
+      // Kalau ini gagal (misal id nggak match / network error), JANGAN
+      // hapus dari state lokal — biar seller tau voucher-nya masih aktif.
       await voucherApi.delete(token, voucherId)
-    } catch {}
-    setVouchers(prev => prev.filter(v => v.id !== voucherId))
-    toast.success('Voucher dihapus')
+      setVouchers(prev => prev.filter(v => v.id !== voucherId))
+      toast.success('Voucher dihapus')
+    } catch (e) {
+      toast.error(e.message || 'Gagal menghapus voucher, coba lagi')
+    }
   }
 
   const generateKode = () => {
@@ -243,13 +218,34 @@ export default function SettingsPage() {
       </div>
 
       <div className="settings-content">
-        {tab === 'toko' && <TokoSettings tokenObj={tokenObj} toko={toko} setToko={setToko} canAccessProFeatures={canAccessProFeatures} />}
-        {tab === 'tampilan' && <TampilanSettings tokenObj={tokenObj} toko={toko} setToko={setToko} canAccessProFeatures={canAccessProFeatures} />}
-        {tab === 'pembayaran' && <PaymentMethodSettings tokenObj={tokenObj} toko={toko} setToko={setToko} />}
-        {tab === 'asisten' && <AsistenSettings tokenObj={tokenObj} toko={toko} />}
-        {tab === 'profil' && <ProfilSettings user={user} planName={planName} tierLevel={tierLevel} />}
+        {tab !== 'profil' && tokoLoading && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            <div className="skeleton" style={{ height: 180, borderRadius: 'var(--radius-lg)' }} />
+            <div className="skeleton" style={{ height: 120, borderRadius: 'var(--radius-lg)' }} />
+          </div>
+        )}
 
-          {tab === 'toko' && (
+        {tab !== 'profil' && !tokoLoading && !toko && (
+          <div className="glass-card" style={{ padding: '32px', textAlign: 'center' }}>
+            <Store size={32} style={{ opacity: 0.4, marginBottom: 12 }} />
+            <h3 style={{ fontWeight: 700, fontSize: '1rem', marginBottom: 6 }}>Kamu belum punya toko</h3>
+            <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
+              Buat toko terlebih dahulu sebelum mengatur info toko, tampilan, pembayaran, atau asisten AI.
+            </p>
+          </div>
+        )}
+
+        {!tokoLoading && (toko || tab === 'profil') && (
+          <>
+            {tab === 'toko' && <TokoSettings tokenObj={tokenObj} toko={toko} setToko={setToko} canAccessProFeatures={canAccessProFeatures} />}
+            {tab === 'tampilan' && <TampilanSettings tokenObj={tokenObj} toko={toko} setToko={setToko} canAccessProFeatures={canAccessProFeatures} />}
+            {tab === 'pembayaran' && <PaymentMethodSettings tokenObj={tokenObj} toko={toko} setToko={setToko} />}
+            {tab === 'asisten' && <AsistenSettings tokenObj={tokenObj} toko={toko} />}
+            {tab === 'profil' && <ProfilSettings user={user} planName={planName} tierLevel={tierLevel} />}
+          </>
+        )}
+
+          {tab === 'toko' && toko && !tokoLoading && (
             <div style={{ marginTop: 32 }}>
               <div style={{
                 display: 'flex', justifyContent: 'space-between',
@@ -778,7 +774,6 @@ function LogoUpload({ value, onChange, disabled }) {
 }
 
 function AsistenSettings({ tokenObj, toko }) {
-  const { token } = useAuthStore()
   const [form, setForm] = useState({
     faq: 'Q: Berapa lama pengiriman pesanan?\nA: Pesanan dikirim H+1 setelah pembayaran terkonfirmasi.\n\nQ: Bisakah COD atau bayar di tempat?\nA: Bisa via fitur Exora Pay & Pengiriman Biteship Kurir.',
     garansi: 'Garansi retur 100% jika produk yang diterima cacat, rusak, atau salah ukuran. Sertakan video unboxing saat klaim.',
@@ -788,7 +783,7 @@ function AsistenSettings({ tokenObj, toko }) {
   const [loading, setLoading] = useState(false)
 
   useEffect(() => {
-    if (!token) return
+    if (!tokenObj) return
     tokoInfoApi.get(tokenObj).then(res => {
       if (res.data) setForm({
         faq: res.data.faq || form.faq,
@@ -796,8 +791,8 @@ function AsistenSettings({ tokenObj, toko }) {
         policy: res.data.policy || form.policy,
         infoLain: res.data.infoLain || form.infoLain,
       })
-    }).catch(() => {})
-  }, [token, tokenObj])
+    }).catch((err) => console.error('Gagal memuat bank data asisten AI:', err))
+  }, [tokenObj])
 
   const set = (field, val) => setForm(f => ({ ...f, [field]: val }))
 
@@ -921,9 +916,12 @@ function TokoSettings({ tokenObj, toko, setToko, canAccessProFeatures }) {
     if (errors[field]) setErrors(e => ({ ...e, [field]: null }))
   }
 
+  const [originSearchError, setOriginSearchError] = useState('')
+
   const handleOriginInput = (val) => {
     setOriginInput(val)
     setOriginOptions([])
+    setOriginSearchError('')
     if (form.originAreaId) {
       set('originAreaId', '')
       set('originAreaLabel', '')
@@ -935,13 +933,12 @@ function TokoSettings({ tokenObj, toko, setToko, canAccessProFeatures }) {
         try {
           const res = await biteshipApi.searchArea(val)
           setOriginOptions(res.data || [])
-        } catch {
-          setOriginOptions([
-            { id: '3174', name: 'Jakarta Selatan', administrative_division_level_1_name: 'DKI Jakarta' },
-            { id: '3171', name: 'Jakarta Pusat', administrative_division_level_1_name: 'DKI Jakarta' },
-            { id: '3273', name: 'Kota Bandung', administrative_division_level_1_name: 'Jawa Barat' },
-            { id: '3578', name: 'Kota Surabaya', administrative_division_level_1_name: 'Jawa Timur' },
-          ].filter(o => o.name.toLowerCase().includes(val.toLowerCase())))
+        } catch (err) {
+          // Jangan nyodorin data hardcode seolah itu hasil pencarian asli —
+          // ID area yang salah bisa bikin kalkulasi ongkir Biteship keliru.
+          setOriginOptions([])
+          setOriginSearchError('Gagal mencari area, coba lagi atau ketik ulang')
+          console.error('Gagal cari area origin:', err)
         }
         setSearchingOrigin(false)
       }, 400)
@@ -1052,6 +1049,7 @@ function TokoSettings({ tokenObj, toko, setToko, canAccessProFeatures }) {
             <span className="form-hint">
               Wajib diisi agar Exora Pay & kalkulator ongkir Biteship bekerja secara presisi
             </span>
+            {originSearchError && <span className="form-error">{originSearchError}</span>}
           </div>
 
           <div className="form-group">
@@ -1341,7 +1339,7 @@ function ProfilSettings({ user, planName, tierLevel }) {
     if (tierLevel >= 3) return 'badge-business'
     if (tierLevel >= 2) return 'badge-pro'
     if (tierLevel >= 1) return 'badge-starter'
-    return 'badge-pro'
+    return 'badge-free'
   }
 
   return (
@@ -1361,7 +1359,7 @@ function ProfilSettings({ user, planName, tierLevel }) {
           <p style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: '1.05rem', color: 'var(--text-primary)' }}>{displayUser.name}</p>
           <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>{displayUser.email}</p>
           <span className={`badge ${getBadgeClass()}`} style={{ marginTop: 8, display: 'inline-block' }}>
-            Plan Aktif: {planName || 'Pro Exora'}
+            Plan Aktif: {planName || 'Free'}
           </span>
         </div>
       </div>
