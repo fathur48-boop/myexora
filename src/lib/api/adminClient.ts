@@ -1,21 +1,6 @@
 // ================================================
 // src/lib/api/adminClient.ts
-// Pengganti panggilan langsung ke supabaseAdmin di browser.
-// File ini AMAN ada di src/ karena TIDAK menyimpan secret apa pun —
-// dia cuma fetch ke endpoint /api/admin milik kita sendiri,
-// dan secret (SUPABASE_SERVICE_ROLE_KEY) tetap di server.
-//
-// REVISI PADA VERSI INI:
-// - Block `paymentApi` di bagian bawah file ini DIHAPUS. Versi lama
-//   mengirim token: null ke action paymentApi.createUpgradePayment /
-//   checkPaymentStatus / getMyPayments, padahal method-method itu
-//   (baik versi mock lama maupun versi Midtrans yang baru di
-//   /api/payment.js) mewajibkan verifyToken(token). Akibatnya
-//   parameter jadi tergeser dan pemanggilan akan gagal.
-//   Import paymentApi yang benar dari src/lib/api/paymentClient.js,
-//   BUKAN dari file ini.
 // ================================================
-
 import { safeFetchJson } from '../utils'
 
 async function call(action: string, token: string | null, ...args: any[]) {
@@ -24,7 +9,6 @@ async function call(action: string, token: string | null, ...args: any[]) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action, token: token ?? null, args }),
   })
-
   const data = await safeFetchJson(res)
   if (!res.ok || data.success === false) {
     throw new Error(data.message || 'Terjadi kesalahan')
@@ -42,7 +26,7 @@ export const authApi = {
 }
 
 // ================================================
-// CUSTOMER (buyer per-toko)
+// CUSTOMER
 // ================================================
 export const customerApi = {
   loginWithGoogle: (googleUser: any, tokoId: string) => call('customerApi.loginWithGoogle', null, googleUser, tokoId),
@@ -116,10 +100,7 @@ export const ratingApi = {
 }
 
 // ================================================
-// ADMIN
-// Semua method ini sekarang wajib token milik user dengan
-// users.is_admin = true (dicek di server, verifyAdminToken). Kalau
-// dipanggil dengan token user biasa, server akan menolak dengan 403.
+// ADMIN — DENGAN CRUD BLOG/GUIDES/HELP
 // ================================================
 export const adminApi = {
   getUsers: (token?: string) => call('adminApi.getUsers', token || null),
@@ -132,6 +113,21 @@ export const adminApi = {
   grantPro: (token: string, targetUserId: string, months: number) => call('adminApi.grantPro', token, targetUserId, months),
   revokePro: (token: string, targetUserId: string) => call('adminApi.revokePro', token, targetUserId),
   deleteUser: (token: string, targetUserId: string) => call('adminApi.deleteUser', token, targetUserId),
+
+  // Blog CRUD
+  createBlogPost: (token: string, data: any) => call('adminApi.createBlogPost', token, data),
+  updateBlogPost: (token: string, postId: string, data: any) => call('adminApi.updateBlogPost', token, postId, data),
+  deleteBlogPost: (token: string, postId: string) => call('adminApi.deleteBlogPost', token, postId),
+
+  // Guides CRUD
+  createGuide: (token: string, data: any) => call('adminApi.createGuide', token, data),
+  updateGuide: (token: string, guideId: string, data: any) => call('adminApi.updateGuide', token, guideId, data),
+  deleteGuide: (token: string, guideId: string) => call('adminApi.deleteGuide', token, guideId),
+
+  // Help Articles CRUD
+  createHelpArticle: (token: string, data: any) => call('adminApi.createHelpArticle', token, data),
+  updateHelpArticle: (token: string, articleId: string, data: any) => call('adminApi.updateHelpArticle', token, articleId, data),
+  deleteHelpArticle: (token: string, articleId: string) => call('adminApi.deleteHelpArticle', token, articleId),
 }
 
 // ================================================
