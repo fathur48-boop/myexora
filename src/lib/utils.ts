@@ -93,7 +93,7 @@ export function getInitials(name?: string): string {
 
 export function getStorefrontUrl(slug?: string): string {
   if (!slug) return '#'
-  return `/toko/${slug}`
+  return `/${slug}`
 }
 
 export async function compressImage(file: File, maxWidth = 800, quality = 0.78): Promise<Blob> {
