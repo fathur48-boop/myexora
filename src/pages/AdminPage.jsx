@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useMemo } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import {
-  ShieldAlert, ShieldCheck, Users, Store, DollarSign,
+  ShieldAlert, ShieldCheck, Users, Store,
   Search, ExternalLink, Zap, RefreshCw,
-  Download, Send, Settings, AlertTriangle, CheckCircle2,
-  Server, Lock, Cpu, Globe, ArrowUpRight,
-  MoreVertical, FileText, ChevronRight, Bell, Sparkles, LogOut,
-  Crown, Clock, BookOpen, HelpCircle, RefreshCcw, Key
+  Download, Send, FileText, ChevronRight, Bell, Sparkles, LogOut,
+  Crown, Clock, BookOpen, HelpCircle, RefreshCcw, Key,
+  AlertTriangle, CheckCircle2, Server, Cpu, Globe, ArrowUpRight,
+  X, Calendar, TrendingUp, Settings, User, Mail, MoreVertical
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import toast from 'react-hot-toast'
@@ -16,57 +16,62 @@ import { formatRupiah } from '../lib/utils'
 import { CONFIG } from '../lib/config'
 import * as XLSX from 'xlsx'
 
-// Harga per plan untuk estimasi pendapatan (dari CONFIG.TIERS)
+// Harga per plan untuk estimasi pendapatan
 const PLAN_PRICES = {
   starter: CONFIG.TIERS.STARTER.priceMonthlyNum || 49000,
   pro: CONFIG.TIERS.PRO.priceMonthlyNum || 99000,
   business: CONFIG.TIERS.BUSINESS.priceMonthlyNum || 249000,
 }
 
+const PLAN_CONFIG = {
+  free: { label: 'Free', color: '#94a3b8', bg: 'rgba(148,163,184,0.15)', border: 'rgba(148,163,184,0.3)', icon: null },
+  starter: { label: 'Starter', color: '#3b82f6', bg: 'rgba(59,130,246,0.15)', border: 'rgba(59,130,246,0.3)', icon: Sparkles },
+  pro: { label: 'Pro', color: '#a855f7', bg: 'rgba(168,85,247,0.15)', border: 'rgba(168,85,247,0.3)', icon: Zap },
+  business: { label: 'Business', color: '#10b981', bg: 'rgba(16,185,129,0.15)', border: 'rgba(16,185,129,0.3)', icon: Crown },
+  expired: { label: 'Expired', color: '#ef4444', bg: 'rgba(239,68,68,0.15)', border: 'rgba(239,68,68,0.3)', icon: Clock },
+}
+
+const DURATION_OPTIONS = [
+  { value: 1, label: '1 Bulan' },
+  { value: 3, label: '3 Bulan' },
+  { value: 6, label: '6 Bulan' },
+  { value: 12, label: '12 Bulan' },
+]
+
 export default function AdminPage() {
   const navigate = useNavigate()
-  const { logout, user, token } = useAuthStore()
+  const { logout } = useAuthStore()
   const [passcode, setPasscode] = useState('')
   const [isAuthenticated, setIsAuthenticated] = useState(true)
   const [activeTab, setActiveTab] = useState('sellers')
 
-  // Data states - diinisialisasi kosong, diisi dari API
   const [stats, setStats] = useState({
-    totalUser: 0,
-    totalToko: 0,
-    totalProduk: 0,
-    freeCount: 0,
-    starterCount: 0,
-    proCount: 0,
-    businessCount: 0,
-    expiredCount: 0,
+    totalUser: 0, totalToko: 0, totalProduk: 0,
+    freeCount: 0, starterCount: 0, proCount: 0, businessCount: 0, expiredCount: 0,
     totalPlatformGmv: 0,
   })
   const [sellers, setSellers] = useState([])
   const [logs, setLogs] = useState([])
   const [loading, setLoading] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
-  const [filterPlan, setFilterPlan] = useState('all') // 'all', 'free', 'starter', 'pro', 'business', 'expired'
+  const [filterPlan, setFilterPlan] = useState('all')
 
-  // Section management counts
   const [sectionCounts, setSectionCounts] = useState({
-    blog: 0,
-    guides: 0,
-    help: 0,
-    updates: 0,
-    credentials: 0,
+    blog: 0, guides: 0, help: 0, updates: 0, credentials: 0,
   })
 
-  // Modals
   const [selectedSeller, setSelectedSeller] = useState(null)
   const [broadcastTitle, setBroadcastTitle] = useState('')
   const [broadcastMessage, setBroadcastMessage] = useState('')
   const [broadcastTarget, setBroadcastTarget] = useState('all')
 
-  // Load Admin Data
-  useEffect(() => {
-    loadAdminData()
-  }, [])
+  // === MODAL SET PLAN ===
+  const [setPlanSeller, setSetPlanSeller] = useState(null)
+  const [setPlanValue, setSetPlanValue] = useState('free')
+  const [setPlanDuration, setSetPlanDuration] = useState(3)
+  const [setPlanLoading, setSetPlanLoading] = useState(false)
+
+  useEffect(() => { loadAdminData() }, [])
 
   const loadAdminData = async () => {
     setLoading(true)
@@ -77,18 +82,9 @@ export default function AdminPage() {
         adminApi.getSellers(token).catch(() => null),
         adminApi.getSystemLogs(token).catch(() => null),
       ])
-
-      if (statsRes?.success && statsRes?.data) {
-        setStats(statsRes.data)
-      }
-      if (sellersRes?.success && Array.isArray(sellersRes.data)) {
-        setSellers(sellersRes.data)
-      }
-      if (logsRes?.success && logsRes?.data) {
-        setLogs(logsRes.data)
-      }
-
-      // Load section counts (non-blocking)
+      if (statsRes?.success && statsRes?.data) setStats(statsRes.data)
+      if (sellersRes?.success && Array.isArray(sellersRes.data)) setSellers(sellersRes.data)
+      if (logsRes?.success && logsRes?.data) setLogs(logsRes.data)
       loadSectionCounts(token)
     } catch (err) {
       console.warn('Gagal memuat data admin:', err)
@@ -99,18 +95,18 @@ export default function AdminPage() {
 
   const loadSectionCounts = async (token) => {
     try {
-      // Fetch blog count
-      const blogRes = await fetch('/api/blog').then(r => r.json()).catch(() => null)
-      const guidesRes = await fetch('/api/guides').then(r => r.json()).catch(() => null)
-      const helpRes = await fetch('/api/help').then(r => r.json()).catch(() => null)
-      const updatesRes = await fetch('/api/updates').then(r => r.json()).catch(() => null)
-
+      const [blogRes, guidesRes, helpRes, updatesRes] = await Promise.all([
+        fetch('/api/blog').then(r => r.json()).catch(() => null),
+        fetch('/api/guides').then(r => r.json()).catch(() => null),
+        fetch('/api/help').then(r => r.json()).catch(() => null),
+        fetch('/api/updates').then(r => r.json()).catch(() => null),
+      ])
       setSectionCounts({
         blog: Array.isArray(blogRes?.data) ? blogRes.data.length : 0,
         guides: Array.isArray(guidesRes?.data) ? guidesRes.data.length : 0,
         help: Array.isArray(helpRes?.data) ? helpRes.data.length : 0,
         updates: Array.isArray(updatesRes?.data) ? updatesRes.data.length : 0,
-        credentials: 0, // Belum ada endpoint
+        credentials: 0,
       })
     } catch (err) {
       console.warn('Gagal load section counts:', err)
@@ -123,7 +119,6 @@ export default function AdminPage() {
     navigate('/login')
   }
 
-  // Passcode verification
   const handleVerifyPasscode = (e) => {
     e.preventDefault()
     if (passcode === 'admin123' || passcode === 'exora') {
@@ -134,25 +129,38 @@ export default function AdminPage() {
     }
   }
 
-  // Toggle PRO subscription - FIX: update item by id, bukan replace seluruh array
-  const handleTogglePro = async (seller) => {
+  // === OPEN MODAL SET PLAN ===
+  const openSetPlan = (seller) => {
+    setSetPlanSeller(seller)
+    setSetPlanValue(seller.plan || 'free')
+    setSetPlanDuration(3)
+  }
+
+  // === SUBMIT SET PLAN (4-TIER MANUAL) ===
+  const handleSetPlanSubmit = async () => {
+    if (!setPlanSeller) return
+    setSetPlanLoading(true)
     try {
-      const res = await adminApi.toggleProStatus(seller.id)
-      if (res.success) {
-        // Update seller di state, bukan replace seluruh array
-        setSellers(prev => prev.map(s =>
-          s.id === seller.id
-            ? { ...s, isPro: res.data.isPro, plan: res.data.isPro ? 'pro' : 'free' }
-            : s
-        ))
-        toast.success(`Status PRO ${seller.storeName} berhasil diperbarui! ✨`)
+      const token = useAuthStore.getState().token
+      const plan = setPlanValue
+      const months = setPlanDuration
+
+      if (plan === 'free') {
+        await adminApi.revokePro(token, setPlanSeller.id)
+        toast.success(`${setPlanSeller.storeName} diturunkan ke Free Plan`)
+      } else {
+        await adminApi.grantPlan(token, setPlanSeller.id, plan, months)
+        toast.success(`${setPlanSeller.storeName} di-set ke ${PLAN_CONFIG[plan].label} (${months} bulan)`)
       }
+      setSetPlanSeller(null)
+      await loadAdminData()
     } catch (err) {
-      toast.error('Gagal mengubah status PRO')
+      toast.error(err.message || 'Gagal mengubah plan')
+    } finally {
+      setSetPlanLoading(false)
     }
   }
 
-  // Toggle Store Active/Suspended - FIX: update item by id
   const handleToggleSuspend = async (seller) => {
     try {
       const res = await adminApi.toggleStoreStatus(seller.id)
@@ -169,7 +177,6 @@ export default function AdminPage() {
     }
   }
 
-  // Send Broadcast
   const handleSendBroadcast = (e) => {
     e.preventDefault()
     if (!broadcastTitle.trim() || !broadcastMessage.trim()) {
@@ -181,7 +188,6 @@ export default function AdminPage() {
     setBroadcastMessage('')
   }
 
-  // Export Full Platform Audit
   const handleExportAudit = () => {
     if (!sellers.length) return
     const exportData = sellers.map((s, idx) => ({
@@ -190,7 +196,7 @@ export default function AdminPage() {
       'Nama Toko': s.storeName,
       'URL Toko': `exora.app/toko/${s.slug}`,
       Email: s.email,
-      'Paket Subscription': s.plan?.toUpperCase() || (s.isPro ? 'PRO' : 'FREE'),
+      'Paket Subscription': (s.plan || 'free').toUpperCase(),
       'Status Akun': s.status.toUpperCase(),
       'Total Produk': s.productsCount,
       'Akumulasi GMV (Rp)': s.gmv,
@@ -203,7 +209,6 @@ export default function AdminPage() {
     toast.success('Laporan Audit Platform berhasil diunduh 📄')
   }
 
-  // Filtered Sellers - FIX: pakai field `plan` bukan `isPro`
   const filteredSellers = useMemo(() => {
     return sellers.filter(s => {
       const matchesSearch = !searchQuery ||
@@ -223,7 +228,6 @@ export default function AdminPage() {
     })
   }, [sellers, searchQuery, filterPlan])
 
-  // Revenue calculation
   const estimatedRevenue = useMemo(() => {
     return (
       (stats.starterCount || 0) * PLAN_PRICES.starter +
@@ -232,14 +236,12 @@ export default function AdminPage() {
     )
   }, [stats])
 
-  // Helper: hitung hari sampai expired
   const getDaysUntilExpiry = (expiryIso) => {
     if (!expiryIso) return null
     const expiry = new Date(expiryIso)
     const now = new Date()
     const diff = expiry.getTime() - now.getTime()
-    const days = Math.ceil(diff / (1000 * 60 * 60 * 24))
-    return days
+    return Math.ceil(diff / (1000 * 60 * 60 * 24))
   }
 
   const formatDaysLeft = (days) => {
@@ -249,7 +251,7 @@ export default function AdminPage() {
     return `${days} hari lagi`
   }
 
-  // Unauthenticated Login Guard View
+  // === UNAUTHENTICATED VIEW ===
   if (!isAuthenticated) {
     return (
       <div style={{
@@ -269,10 +271,8 @@ export default function AdminPage() {
           }}>
             <ShieldAlert size={28} />
           </div>
-          <h2 style={{ fontSize: '1.4rem', fontWeight: 800, margin: '0 0 8px' }}>
-            Akses Terkunci Admin
-          </h2>
-          <p style={{ color: 'var(--text-secondary)', fontSize: '0.88rem', marginBottom: 24 }}>
+          <h2 style={{ fontSize: '1.4rem', fontWeight: 800, margin: '0 0 8px' }}>Akses Terkunci Admin</h2>
+          <p style={{ color: '#94a3b8', fontSize: '0.88rem', marginBottom: 24 }}>
             Masukkan PIN Superadmin Exora Platform untuk mengakses dasbor kontrol internal.
           </p>
           <form onSubmit={handleVerifyPasscode}>
@@ -289,11 +289,11 @@ export default function AdminPage() {
               autoFocus
             />
             <button type="submit" className="btn btn-primary" style={{ width: '100%', height: 46 }}>
-              Buka Akses Admin <Lock size={16} />
+              Buka Akses Admin
             </button>
           </form>
           <div style={{ marginTop: 20 }}>
-            <Link to="/seller" style={{ fontSize: '0.82rem', color: 'var(--text-tertiary)', textDecoration: 'none' }}>
+            <Link to="/dashboard" style={{ fontSize: '0.82rem', color: '#64748b', textDecoration: 'none' }}>
               ← Kembali ke Seller Dashboard
             </Link>
           </div>
@@ -307,7 +307,7 @@ export default function AdminPage() {
       minHeight: '100vh', background: '#0a0b10', color: '#f1f5f9',
       fontFamily: "'Plus Jakarta Sans', sans-serif"
     }}>
-      {/* --- TOP ADMIN HEADER --- */}
+      {/* === HEADER === */}
       <header style={{
         position: 'sticky', top: 0, zIndex: 40,
         background: 'rgba(10, 11, 16, 0.9)', backdropFilter: 'blur(16px)',
@@ -359,102 +359,70 @@ export default function AdminPage() {
         </div>
       </header>
 
-      {/* --- MAIN CONTAINER --- */}
+      {/* === MAIN === */}
       <main style={{ maxWidth: 1280, margin: '0 auto', padding: '28px 24px 60px', display: 'flex', flexDirection: 'column', gap: 24 }}>
-        {/* --- PLATFORM STATS OVERVIEW (7 Cards) --- */}
-        <div style={{
-          display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 16
-        }}>
-          {/* Total Seller */}
+
+        {/* === STATS CARDS (8 CARDS) === */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 16 }}>
           <div style={{ background: '#141722', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 18, padding: 20 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', color: '#94a3b8', fontSize: '0.78rem', marginBottom: 10 }}>
               <span>TOTAL SELLER</span>
               <Users size={18} style={{ color: '#38bdf8' }} />
             </div>
-            <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#38bdf8', marginBottom: 4 }}>
-              {stats.totalUser || 0}
-            </div>
+            <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#38bdf8' }}>{stats.totalUser || 0}</div>
           </div>
-
-          {/* Free */}
           <div style={{ background: '#141722', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 18, padding: 20 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', color: '#94a3b8', fontSize: '0.78rem', marginBottom: 10 }}>
               <span>FREE</span>
-              <Users size={18} style={{ color: '#64748b' }} />
+              <Users size={18} style={{ color: '#94a3b8' }} />
             </div>
-            <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#94a3b8', marginBottom: 4 }}>
-              {stats.freeCount || 0}
-            </div>
+            <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#94a3b8' }}>{stats.freeCount || 0}</div>
           </div>
-
-          {/* Starter */}
           <div style={{ background: '#141722', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 18, padding: 20 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', color: '#94a3b8', fontSize: '0.78rem', marginBottom: 10 }}>
               <span>STARTER</span>
               <Sparkles size={18} style={{ color: '#3b82f6' }} />
             </div>
-            <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#3b82f6', marginBottom: 4 }}>
-              {stats.starterCount || 0}
-            </div>
+            <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#3b82f6' }}>{stats.starterCount || 0}</div>
           </div>
-
-          {/* Pro */}
           <div style={{ background: '#141722', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 18, padding: 20 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', color: '#94a3b8', fontSize: '0.78rem', marginBottom: 10 }}>
               <span>PRO</span>
               <Zap size={18} style={{ color: '#a855f7' }} />
             </div>
-            <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#a855f7', marginBottom: 4 }}>
-              {stats.proCount || 0}
-            </div>
+            <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#a855f7' }}>{stats.proCount || 0}</div>
           </div>
-
-          {/* Business */}
           <div style={{ background: '#141722', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 18, padding: 20 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', color: '#94a3b8', fontSize: '0.78rem', marginBottom: 10 }}>
               <span>BUSINESS</span>
               <Crown size={18} style={{ color: '#10b981' }} />
             </div>
-            <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#10b981', marginBottom: 4 }}>
-              {stats.businessCount || 0}
-            </div>
+            <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#10b981' }}>{stats.businessCount || 0}</div>
           </div>
-
-          {/* Expired */}
           <div style={{ background: '#141722', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 18, padding: 20 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', color: '#94a3b8', fontSize: '0.78rem', marginBottom: 10 }}>
               <span>EXPIRED</span>
               <Clock size={18} style={{ color: '#ef4444' }} />
             </div>
-            <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#ef4444', marginBottom: 4 }}>
-              {stats.expiredCount || 0}
-            </div>
+            <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#ef4444' }}>{stats.expiredCount || 0}</div>
           </div>
-
-          {/* Total Toko */}
           <div style={{ background: '#141722', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 18, padding: 20 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', color: '#94a3b8', fontSize: '0.78rem', marginBottom: 10 }}>
               <span>TOTAL TOKO</span>
               <Store size={18} style={{ color: '#10b981' }} />
             </div>
-            <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#10b981', marginBottom: 4 }}>
-              {stats.totalToko || 0}
-            </div>
+            <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#10b981' }}>{stats.totalToko || 0}</div>
           </div>
-
-          {/* Total Produk */}
           <div style={{ background: '#141722', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 18, padding: 20 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', color: '#94a3b8', fontSize: '0.78rem', marginBottom: 10 }}>
               <span>TOTAL PRODUK</span>
               <FileText size={18} style={{ color: '#f59e0b' }} />
             </div>
-            <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#f59e0b', marginBottom: 4 }}>
-              {stats.totalProduk || 0}
-            </div>
+            <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#f59e0b' }}>{stats.totalProduk || 0}</div>
           </div>
         </div>
 
-        {/* --- REVENUE BANNER --- */}
+        {/* === REVENUE BANNER === */}
         <div style={{
           background: 'linear-gradient(135deg, rgba(91,138,245,0.1) 0%, rgba(167,139,250,0.1) 100%)',
           border: '1px solid rgba(167,139,250,0.2)',
@@ -489,7 +457,7 @@ export default function AdminPage() {
           </div>
         </div>
 
-        {/* --- NAVIGATION TABS --- */}
+        {/* === NAVIGATION TABS === */}
         <div style={{
           display: 'flex', gap: 12, borderBottom: '1px solid rgba(255,255,255,0.08)', paddingBottom: 12, overflowX: 'auto'
         }}>
@@ -497,6 +465,7 @@ export default function AdminPage() {
             { id: 'sellers', label: 'Daftar Toko & Seller', icon: Users, badge: sellers.length },
             { id: 'system', label: 'Kesehatan Sistem & Logs', icon: Server },
             { id: 'broadcast', label: 'Pengumuman Platform', icon: Bell },
+            { id: 'content', label: 'Konten & Artikel', icon: FileText, badge: sectionCounts.blog + sectionCounts.guides + sectionCounts.help },
           ].map(tab => {
             const Icon = tab.icon
             const isActive = activeTab === tab.id
@@ -514,7 +483,7 @@ export default function AdminPage() {
               >
                 <Icon size={16} />
                 {tab.label}
-                {tab.badge !== undefined && (
+                {tab.badge !== undefined && tab.badge > 0 && (
                   <span style={{
                     background: isActive ? 'rgba(0,0,0,0.15)' : 'rgba(255,255,255,0.1)',
                     padding: '2px 8px', borderRadius: 100, fontSize: '0.72rem'
@@ -527,7 +496,7 @@ export default function AdminPage() {
           })}
         </div>
 
-        {/* --- TAB 1: SELLERS MANAGEMENT --- */}
+        {/* === TAB 1: SELLERS MANAGEMENT === */}
         {activeTab === 'sellers' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
             {/* Filters Bar - Plan-based */}
@@ -551,8 +520,9 @@ export default function AdminPage() {
                   { id: 'all', label: 'Semua', count: sellers.length },
                   { id: 'free', label: 'Gratis', count: stats.freeCount || 0 },
                   { id: 'starter', label: '⭐ Starter', count: stats.starterCount || 0 },
-                  { id: 'pro', label: ' Pro', count: stats.proCount || 0 },
+                  { id: 'pro', label: '⚡ Pro', count: stats.proCount || 0 },
                   { id: 'business', label: '👑 Business', count: stats.businessCount || 0 },
+                  { id: 'expired', label: '⏰ Expired', count: stats.expiredCount || 0 },
                 ].map(f => (
                   <button
                     key={f.id}
@@ -596,14 +566,9 @@ export default function AdminPage() {
                   <tbody>
                     {filteredSellers.map(seller => {
                       const daysLeft = getDaysUntilExpiry(seller.planExpiry)
-                      const planLabel = seller.plan?.toUpperCase() || (seller.isPro ? 'PRO' : 'FREE')
-                      const planColor = {
-                        free: '#94a3b8',
-                        starter: '#3b82f6',
-                        pro: '#a855f7',
-                        business: '#10b981',
-                        expired: '#ef4444',
-                      }[seller.plan] || '#94a3b8'
+                      const plan = seller.plan || 'free'
+                      const planCfg = PLAN_CONFIG[plan] || PLAN_CONFIG.free
+                      const PlanIcon = planCfg.icon
 
                       return (
                         <tr key={seller.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)', transition: 'background 0.2s' }}>
@@ -624,16 +589,14 @@ export default function AdminPage() {
                           <td style={{ padding: '14px 18px' }}>
                             <span style={{
                               padding: '4px 10px', borderRadius: 100, fontSize: '0.72rem', fontWeight: 800,
-                              background: `${planColor}20`, color: planColor, border: `1px solid ${planColor}40`,
+                              background: planCfg.bg, color: planCfg.color, border: `1px solid ${planCfg.border}`,
                               display: 'inline-flex', alignItems: 'center', gap: 4,
                               marginBottom: daysLeft !== null ? 4 : 0,
                             }}>
-                              {seller.plan === 'business' && <Crown size={12} />}
-                              {seller.plan === 'pro' && <Zap size={12} />}
-                              {seller.plan === 'starter' && <Sparkles size={12} />}
-                              {planLabel}
+                              {PlanIcon && <PlanIcon size={12} />}
+                              {planCfg.label.toUpperCase()}
                             </span>
-                            {daysLeft !== null && seller.plan !== 'free' && (
+                            {daysLeft !== null && plan !== 'free' && (
                               <div style={{
                                 fontSize: '0.68rem',
                                 color: daysLeft < 0 ? '#ef4444' : daysLeft <= 7 ? '#f59e0b' : '#10b981',
@@ -663,17 +626,16 @@ export default function AdminPage() {
                           <td style={{ padding: '14px 18px', textAlign: 'right' }}>
                             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
                               <button
-                                onClick={() => handleTogglePro(seller)}
+                                onClick={() => openSetPlan(seller)}
                                 className="btn btn-sm"
                                 style={{
                                   fontSize: '0.72rem', padding: '4px 10px',
-                                  background: seller.isPro ? 'rgba(239, 68, 68, 0.15)' : 'rgba(168, 85, 247, 0.15)',
-                                  color: seller.isPro ? '#f87171' : '#c084fc',
+                                  background: 'rgba(168, 85, 247, 0.15)',
+                                  color: '#c084fc',
                                   border: 'none', borderRadius: 6, cursor: 'pointer'
                                 }}
-                                title={seller.isPro ? 'Downgrade ke Free' : 'Upgrade ke PRO'}
                               >
-                                {seller.isPro ? 'Set Free' : 'Set PRO'}
+                                Set Plan
                               </button>
                               <button
                                 onClick={() => handleToggleSuspend(seller)}
@@ -706,7 +668,7 @@ export default function AdminPage() {
           </div>
         )}
 
-        {/* --- TAB 2: SYSTEM HEALTH & LOGS --- */}
+        {/* === TAB 2: SYSTEM HEALTH & LOGS === */}
         {activeTab === 'system' && (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 20 }}>
             <div style={{ background: '#141722', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 18, padding: 24 }}>
@@ -754,7 +716,7 @@ export default function AdminPage() {
           </div>
         )}
 
-        {/* --- TAB 3: BROADCAST ANNOUNCEMENTS --- */}
+        {/* === TAB 3: BROADCAST ANNOUNCEMENTS === */}
         {activeTab === 'broadcast' && (
           <div style={{ maxWidth: 680, background: '#141722', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 20, padding: 28 }}>
             <h3 style={{ fontSize: '1.1rem', fontWeight: 800, margin: '0 0 6px', color: '#fff', display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -811,62 +773,66 @@ export default function AdminPage() {
           </div>
         )}
 
-        {/* --- SECTION MANAGEMENT (Seller Hub, Panduan, Bantuan, Updates, Kredensial) --- */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          {[
-            { icon: BookOpen, label: 'Seller Hub / Blog', count: sectionCounts.blog, color: '#3b82f6', link: '/blog' },
-            { icon: FileText, label: 'Panduan / Tutorial', count: sectionCounts.guides, color: '#10b981', link: '/guides' },
-            { icon: HelpCircle, label: 'Pusat Bantuan', count: sectionCounts.help, color: '#a855f7', link: '/help' },
-            { icon: RefreshCcw, label: 'Update Fitur / Changelog', count: sectionCounts.updates, color: '#f59e0b', link: '/updates' },
-            { icon: Key, label: 'Integrasi & Kredensial', count: sectionCounts.credentials, color: '#ef4444', link: null },
-          ].map((section, idx) => {
-            const Icon = section.icon
-            return (
-              <div
-                key={idx}
-                style={{
-                  background: '#141722',
-                  border: '1px solid rgba(255,255,255,0.08)',
-                  borderRadius: 18,
-                  padding: '18px 24px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  gap: 16,
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-                  <div style={{
-                    width: 42, height: 42, borderRadius: 12,
-                    background: `${section.color}15`,
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    color: section.color,
-                  }}>
-                    <Icon size={20} />
-                  </div>
-                  <div>
-                    <div style={{ fontSize: '0.95rem', fontWeight: 700, color: '#fff' }}>{section.label}</div>
-                    <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>{section.count} {section.label.includes('Blog') ? 'artikel' : section.label.includes('Panduan') ? 'panduan' : section.label.includes('Bantuan') ? 'artikel' : section.label.includes('Update') ? 'update' : 'kredensial'}</div>
-                  </div>
-                </div>
-                {section.link ? (
-                  <Link
-                    to={section.link}
-                    className="btn btn-secondary btn-sm"
-                    style={{ gap: 6 }}
+        {/* === TAB 4: CONTENT MANAGEMENT === */}
+        {activeTab === 'content' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 16 }}>
+              {[
+                { type: 'blog', label: 'Seller Hub / Blog', count: sectionCounts.blog, color: '#3b82f6', icon: BookOpen, link: '/blog', unit: 'artikel' },
+                { type: 'guides', label: 'Panduan / Tutorial', count: sectionCounts.guides, color: '#10b981', icon: FileText, link: '/guides', unit: 'panduan' },
+                { type: 'help', label: 'Pusat Bantuan', count: sectionCounts.help, color: '#a855f7', icon: HelpCircle, link: '/help', unit: 'artikel' },
+                { type: 'updates', label: 'Update Fitur / Changelog', count: sectionCounts.updates, color: '#f59e0b', icon: RefreshCcw, link: '/updates', unit: 'update' },
+                { type: 'credentials', label: 'Integrasi & Kredensial', count: sectionCounts.credentials, color: '#ef4444', icon: Key, link: null, unit: 'kredensial' },
+              ].map((section, idx) => {
+                const Icon = section.icon
+                return (
+                  <div
+                    key={idx}
+                    style={{
+                      background: '#141722',
+                      border: '1px solid rgba(255,255,255,0.08)',
+                      borderRadius: 18,
+                      padding: '18px 24px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: 16,
+                    }}
                   >
-                    Lihat <ChevronRight size={14} />
-                  </Link>
-                ) : (
-                  <span style={{ fontSize: '0.78rem', color: '#64748b' }}>Segera hadir</span>
-                )}
-              </div>
-            )
-          })}
-        </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+                      <div style={{
+                        width: 42, height: 42, borderRadius: 12,
+                        background: `${section.color}15`,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        color: section.color,
+                      }}>
+                        <Icon size={20} />
+                      </div>
+                      <div>
+                        <div style={{ fontSize: '0.95rem', fontWeight: 700, color: '#fff' }}>{section.label}</div>
+                        <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>{section.count} {section.unit}</div>
+                      </div>
+                    </div>
+                    {section.link ? (
+                      <Link
+                        to={section.link}
+                        className="btn btn-secondary btn-sm"
+                        style={{ gap: 6 }}
+                      >
+                        Lihat <ChevronRight size={14} />
+                      </Link>
+                    ) : (
+                      <span style={{ fontSize: '0.78rem', color: '#64748b' }}>Segera hadir</span>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
       </main>
 
-      {/* --- SELLER DETAIL MODAL --- */}
+      {/* === SELLER DETAIL MODAL === */}
       <AnimatePresence>
         {selectedSeller && (
           <div style={{
@@ -903,8 +869,8 @@ export default function AdminPage() {
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                   <div style={{ background: '#0e1017', padding: 12, borderRadius: 10 }}>
                     <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>Status Paket</div>
-                    <div style={{ fontWeight: 700, color: '#a855f7' }}>
-                      {selectedSeller.plan?.toUpperCase() || (selectedSeller.isPro ? 'PRO' : 'FREE')}
+                    <div style={{ fontWeight: 700, color: PLAN_CONFIG[selectedSeller.plan || 'free'].color }}>
+                      {PLAN_CONFIG[selectedSeller.plan || 'free'].label.toUpperCase()}
                     </div>
                     {selectedSeller.planExpiry && (
                       <div style={{ fontSize: '0.72rem', color: '#64748b', marginTop: 4 }}>
@@ -936,6 +902,118 @@ export default function AdminPage() {
                   style={{ flex: 1, height: 42 }}
                 >
                   Tutup
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* === SET PLAN MODAL (4-TIER) === */}
+      <AnimatePresence>
+        {setPlanSeller && (
+          <div style={{
+            position: 'fixed', inset: 0, zIndex: 100,
+            background: 'rgba(0, 0, 0, 0.8)', backdropFilter: 'blur(8px)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20
+          }}>
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              style={{
+                width: '100%', maxWidth: 480, background: '#161822',
+                border: '1px solid rgba(255, 255, 255, 0.12)', borderRadius: 20, padding: 24
+              }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                <h3 style={{ fontSize: '1.15rem', fontWeight: 800, margin: 0, color: '#fff' }}>
+                  Set Plan Seller
+                </h3>
+                <button
+                  onClick={() => setSetPlanSeller(null)}
+                  className="btn btn-ghost btn-sm"
+                  style={{ color: '#94a3b8' }}
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div style={{ background: '#0e1017', padding: 12, borderRadius: 12, marginBottom: 16 }}>
+                <div style={{ fontWeight: 700, color: '#fff', fontSize: '0.95rem' }}>{setPlanSeller.storeName}</div>
+                <div style={{ color: '#94a3b8', fontSize: '0.8rem' }}>{setPlanSeller.name} • {setPlanSeller.email}</div>
+              </div>
+
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ fontSize: '0.8rem', fontWeight: 700, color: '#cbd5e1', marginBottom: 8, display: 'block' }}>
+                  Pilih Plan
+                </label>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                  {Object.entries(PLAN_CONFIG).filter(([key]) => key !== 'expired').map(([key, cfg]) => {
+                    const Icon = cfg.icon
+                    return (
+                      <button
+                        key={key}
+                        onClick={() => setSetPlanValue(key)}
+                        style={{
+                          padding: '10px 12px', borderRadius: 10,
+                          background: setPlanValue === key ? cfg.bg : '#0e1017',
+                          border: `2px solid ${setPlanValue === key ? cfg.color : 'rgba(255,255,255,0.08)'}`,
+                          color: setPlanValue === key ? cfg.color : '#94a3b8',
+                          cursor: 'pointer',
+                          display: 'flex', alignItems: 'center', gap: 8,
+                          fontSize: '0.85rem', fontWeight: 700,
+                        }}
+                      >
+                        {Icon && <Icon size={16} />}
+                        {cfg.label}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+
+              {setPlanValue !== 'free' && (
+                <div style={{ marginBottom: 20 }}>
+                  <label style={{ fontSize: '0.8rem', fontWeight: 700, color: '#cbd5e1', marginBottom: 8, display: 'block' }}>
+                    Durasi Langganan
+                  </label>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6 }}>
+                    {DURATION_OPTIONS.map(opt => (
+                      <button
+                        key={opt.value}
+                        onClick={() => setSetPlanDuration(opt.value)}
+                        style={{
+                          padding: '8px 4px', borderRadius: 8,
+                          background: setPlanDuration === opt.value ? 'rgba(168, 85, 247, 0.2)' : '#0e1017',
+                          border: `1px solid ${setPlanDuration === opt.value ? '#a855f7' : 'rgba(255,255,255,0.08)'}`,
+                          color: setPlanDuration === opt.value ? '#c084fc' : '#94a3b8',
+                          cursor: 'pointer',
+                          fontSize: '0.78rem', fontWeight: 600,
+                        }}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div style={{ display: 'flex', gap: 10 }}>
+                <button
+                  onClick={() => setSetPlanSeller(null)}
+                  className="btn btn-secondary"
+                  style={{ flex: 1, height: 42 }}
+                >
+                  Batal
+                </button>
+                <button
+                  onClick={handleSetPlanSubmit}
+                  disabled={setPlanLoading}
+                  className="btn btn-primary"
+                  style={{ flex: 1, height: 42 }}
+                >
+                  {setPlanLoading ? 'Menyimpan...' : 'Simpan Plan'}
                 </button>
               </div>
             </motion.div>
