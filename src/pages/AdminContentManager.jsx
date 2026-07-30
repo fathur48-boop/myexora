@@ -282,6 +282,7 @@ export default function AdminContentManager({ type = 'blog', onBack }) {
       label: 'Blog Posts',
       icon: FileText,
       color: '#3b82f6',
+      publicPath: '/blog',
       api: {
         list: '/api/blog',
         create: adminApi.createBlogPost,
@@ -294,6 +295,7 @@ export default function AdminContentManager({ type = 'blog', onBack }) {
       label: 'Panduan / Tutorial',
       icon: BookOpen,
       color: '#10b981',
+      publicPath: '/guides',
       api: {
         list: '/api/guides',
         create: adminApi.createGuide,
@@ -306,6 +308,7 @@ export default function AdminContentManager({ type = 'blog', onBack }) {
       label: 'Pusat Bantuan',
       icon: HelpCircle,
       color: '#a855f7',
+      publicPath: '/help',
       api: {
         list: '/api/help',
         create: adminApi.createHelpArticle,
@@ -420,25 +423,50 @@ export default function AdminContentManager({ type = 'blog', onBack }) {
             </div>
           </div>
         </div>
-        <button
-          onClick={handleCreate}
-          style={{
-            padding: '10px 20px',
-            borderRadius: 'var(--radius-md)',
-            background: 'var(--accent-gradient)',
-            color: '#fff',
-            border: 'none',
-            cursor: 'pointer',
-            fontSize: '0.88rem',
-            fontWeight: 700,
-            display: 'flex',
-            alignItems: 'center',
-            gap: '8px',
-          }}
-        >
-          <Plus size={16} />
-          Buat Artikel Baru
-        </button>
+        <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+          {config.publicPath && (
+            <a
+              href={config.publicPath}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{
+                padding: '10px 16px',
+                borderRadius: 'var(--radius-md)',
+                background: 'var(--surface)',
+                border: '1px solid var(--glass-border)',
+                color: 'var(--text-secondary)',
+                cursor: 'pointer',
+                fontSize: '0.88rem',
+                fontWeight: 600,
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                textDecoration: 'none',
+              }}
+            >
+              Lihat Halaman Publik
+            </a>
+          )}
+          <button
+            onClick={handleCreate}
+            style={{
+              padding: '10px 20px',
+              borderRadius: 'var(--radius-md)',
+              background: 'var(--accent-gradient)',
+              color: '#fff',
+              border: 'none',
+              cursor: 'pointer',
+              fontSize: '0.88rem',
+              fontWeight: 700,
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+            }}
+          >
+            <Plus size={16} />
+            Buat Artikel Baru
+          </button>
+        </div>
       </div>
 
       {/* Search */}
