@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { streamApi, authApi } from './api/adminClient'
+import { streamApi, authApi, tokoApi, produkApi } from './api/adminClient'
 
 interface AuthState {
   user: any
@@ -99,18 +99,25 @@ export const useTokoStore = create<TokoState>((set) => ({
     else localStorage.removeItem('exora_toko')
     set({ toko })
   },
-  load: async () => {
+  load: async (token) => {
     set({ isLoading: true })
     try {
-      const stored = localStorage.getItem('exora_toko')
-      if (stored) {
-        set({ toko: JSON.parse(stored), isLoading: false })
-      } else {
-        const mockToko = { id: 'toko-1', nama: 'Toko Saya', slug: 'tokosaya' }
-        localStorage.setItem('exora_toko', JSON.stringify(mockToko))
-        set({ toko: mockToko, isLoading: false })
+      if (!token) {
+        // Tidak ada token = belum login, jangan render toko siapapun.
+        localStorage.removeItem('exora_toko')
+        set({ toko: null, isLoading: false })
+        return
       }
-    } catch {
+      const res = await tokoApi.getMine(token)
+      const toko = res?.data || null
+      if (toko) {
+        localStorage.setItem('exora_toko', JSON.stringify(toko))
+      } else {
+        localStorage.removeItem('exora_toko')
+      }
+      set({ toko, isLoading: false })
+    } catch (err) {
+      console.error('Gagal memuat data toko dari server:', err)
       set({ isLoading: false })
     }
   },
@@ -135,21 +142,20 @@ interface ProdukState {
 export const useProdukStore = create<ProdukState>((set) => ({
   produk: JSON.parse(localStorage.getItem('exora_produk') || '[]'),
   isLoading: false,
-  load: async () => {
+  load: async (token) => {
     set({ isLoading: true })
     try {
-      const stored = localStorage.getItem('exora_produk')
-      if (stored) {
-        set({ produk: JSON.parse(stored), isLoading: false })
-      } else {
-        const initialProduk = [
-          { id: '1', nama: 'Kaos Oversize Premium', harga: 89000, hargaCoret: 120000, hpp: 45000, kategori: 'Pakaian', stok: 15, aktif: true, foto: '["https://images.unsplash.com/photo-1521572267360-ee0c2909d518?w=500"]' },
-          { id: '2', nama: 'Sepatu Sneakers Canvas', harga: 199000, hargaCoret: 250000, hpp: 110000, kategori: 'Sepatu', stok: 8, aktif: true, foto: '["https://images.unsplash.com/photo-1549298916-b41d501d3772?w=500"]' }
-        ]
-        localStorage.setItem('exora_produk', JSON.stringify(initialProduk))
-        set({ produk: initialProduk, isLoading: false })
+      if (!token) {
+        localStorage.removeItem('exora_produk')
+        set({ produk: [], isLoading: false })
+        return
       }
-    } catch {
+      const res = await produkApi.getMine(token)
+      const produk = Array.isArray(res?.data) ? res.data : []
+      localStorage.setItem('exora_produk', JSON.stringify(produk))
+      set({ produk, isLoading: false })
+    } catch (err) {
+      console.error('Gagal memuat produk dari server:', err)
       set({ isLoading: false })
     }
   },
