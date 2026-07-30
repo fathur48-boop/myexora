@@ -45,10 +45,8 @@ export const useAuthStore = create<AuthState>((set) => ({
   setAuth: (user, token) => {
     if (user) localStorage.setItem('exora_user', JSON.stringify(user))
     else localStorage.removeItem('exora_user')
-
     if (token) localStorage.setItem('exora_token', token || '')
     else localStorage.removeItem('exora_token')
-
     set({ user, token, isAuthenticated: !!(user || token) })
   },
   loginWithGoogle: async (payload) => {
@@ -59,11 +57,9 @@ export const useAuthStore = create<AuthState>((set) => ({
       sub: payload.sub || 'google_' + Date.now(),
       agreedToTerms: payload.agreedToTerms !== false,
     })
-
     if (!res?.data?.token || !res?.data?.user) {
       throw new Error('Login gagal: respons server tidak valid')
     }
-
     const user = res.data.user
     const token = res.data.token
     localStorage.setItem('exora_user', JSON.stringify(user))
@@ -225,7 +221,7 @@ export const MOCK_STREAM_POSTS = [
       logo: 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=200&auto=format&fit=crop&q=80',
       pro: true,
     },
-    teks: 'Koleksi Kemeja Batik Solo Premium Katun Primishima Halus edisi terbatas awal bulan ini resmi rilis! Siap kirim ke seluruh Indonesia dengan garansi retur & gratis ongkir. Hubungi admin atau klik toko untuk order! 🌸🇮🇩',
+    teks: 'Koleksi Kemeja Batik Solo Premium Katun Primishima Halus edisi terbatas awal bulan ini resmi rilis! Siap kirim ke seluruh Indonesia dengan garansi retur & gratis ongkir. Hubungi admin atau klik toko untuk order! 🇮🇩',
     postType: 'produk_baru',
     foto: [
       'https://images.unsplash.com/photo-1607345366928-199ea26cfe3e?w=800&auto=format&fit=crop&q=80',
@@ -375,7 +371,7 @@ export const MOCK_DM_MESSAGES: Record<string, any[]> = {
   thread_kopi: [
     { id: 'm1', teks: 'Halo Kak! Salam sesama seller Exora. Tertarik ambil sampel Biji Kopi Gayo Single Origin?', isMine: false, createdAt: new Date(Date.now() - 1000 * 60 * 60).toISOString() },
     { id: 'm2', teks: 'Halo kak! Boleh minta pricelist grosir min 10kg?', isMine: true, createdAt: new Date(Date.now() - 1000 * 60 * 30).toISOString() },
-    { id: 'm3', teks: 'Siap kak! Harga grosir Rp 120.000/kg (min 10kg). Katalog harga grosir Kopi Gayo 1kg siap dikirim via J&T/Biteship ya kak 🚚', isMine: false, createdAt: new Date(Date.now() - 1000 * 60 * 12).toISOString() }
+    { id: 'm3', teks: 'Siap kak! Harga grosir Rp 120.000/kg (min 10kg). Katalog harga grosir Kopi Gayo 1kg siap dikirim via J&T/Biteship ya kak ', isMine: false, createdAt: new Date(Date.now() - 1000 * 60 * 12).toISOString() }
   ],
   thread_rina: [
     { id: 'm4', teks: 'Sis, mau kolaborasi cross-promo produk di Stream Exora pekan ini?', isMine: false, createdAt: new Date(Date.now() - 1000 * 60 * 180).toISOString() },
@@ -436,7 +432,6 @@ export const useStreamStore = create<StreamState>((set, get) => ({
   activeThreadId: null,
   notifs: MOCK_NOTIFS,
   unreadNotifCount: 2,
-
   loadFeed: async (tokenObj, params = {}) => {
     set({ feedLoading: true })
     try {
@@ -461,7 +456,6 @@ export const useStreamStore = create<StreamState>((set, get) => ({
   },
   setActiveTag: (tag) => set({ activeTag: tag }),
   setSearchQuery: (query) => set({ searchQuery: query }),
-
   loadPostDetail: async (tokenObj, postId) => {
     set({ postDetailLoading: true })
     try {
@@ -478,12 +472,10 @@ export const useStreamStore = create<StreamState>((set, get) => ({
     }
   },
   clearPostDetail: () => set({ postDetail: null }),
-
   addReply: async (tokenObj, data) => {
     try {
       await streamApi.addReply(tokenObj, data)
     } catch {}
-    
     const newReply = {
       id: 'rep_' + Date.now(),
       postId: data.postId,
@@ -495,7 +487,6 @@ export const useStreamStore = create<StreamState>((set, get) => ({
       liked: false,
       replies: []
     }
-
     set((state) => {
       const updatedFeed = state.feed.map(p => {
         if (p.id === data.postId) {
@@ -518,12 +509,10 @@ export const useStreamStore = create<StreamState>((set, get) => ({
       return { feed: updatedFeed, postDetail: updatedDetail }
     })
   },
-
   toggleLike: async (tokenObj, data) => {
     try {
       await streamApi.toggleLike(tokenObj, data)
     } catch {}
-
     set((state) => {
       const updatedFeed = state.feed.map(p => {
         if (p.id === data.targetId) {
@@ -548,12 +537,10 @@ export const useStreamStore = create<StreamState>((set, get) => ({
       return { feed: updatedFeed, postDetail: updatedDetail }
     })
   },
-
   toggleRepost: async (tokenObj, data) => {
     try {
       await streamApi.toggleRepost(tokenObj, data)
     } catch {}
-
     set((state) => {
       const updatedFeed = state.feed.map(p => {
         if (p.id === data.postId) {
@@ -569,12 +556,10 @@ export const useStreamStore = create<StreamState>((set, get) => ({
       return { feed: updatedFeed }
     })
   },
-
   toggleBookmark: async (tokenObj, data) => {
     try {
       await streamApi.toggleBookmark(tokenObj, data)
     } catch {}
-
     set((state) => {
       const updatedFeed = state.feed.map(p => {
         if (p.id === data.postId) {
@@ -585,25 +570,21 @@ export const useStreamStore = create<StreamState>((set, get) => ({
       return { feed: updatedFeed }
     })
   },
-
   deletePost: async (tokenObj, postId) => {
     try {
       await streamApi.deletePost(tokenObj, postId)
     } catch {}
-
     set((state) => ({
       feed: state.feed.filter(p => p.id !== postId),
       postDetail: state.postDetail?.id === postId ? null : state.postDetail
     }))
   },
-
   createPost: async (tokenObj, data) => {
     let createdFromApi = null
     try {
       const res = await streamApi.createPost(tokenObj, data)
       if (res && res.data) createdFromApi = res.data
     } catch {}
-
     const newPost = createdFromApi || {
       id: 'post_' + Date.now(),
       toko: {
@@ -627,12 +608,10 @@ export const useStreamStore = create<StreamState>((set, get) => ({
       createdAt: new Date().toISOString(),
       previewReplies: []
     }
-
     set((state) => ({
       feed: [newPost, ...state.feed]
     }))
   },
-
   loadDmThreads: async (tokenObj) => {
     try {
       const res = await streamApi.getDmThreads(tokenObj)
@@ -645,7 +624,6 @@ export const useStreamStore = create<StreamState>((set, get) => ({
       set({ dmThreads: MOCK_DM_THREADS })
     }
   },
-
   openDmThread: async (tokenObj, data) => {
     try {
       const res = await streamApi.openDmThread(tokenObj, data)
@@ -654,7 +632,6 @@ export const useStreamStore = create<StreamState>((set, get) => ({
         return res.threadId
       }
     } catch {}
-    
     // Fallback local thread
     let existing = get().dmThreads.find(t => t.toko?.id === data.otherTokoId || t.id === data.otherTokoId)
     if (!existing) {
@@ -670,9 +647,7 @@ export const useStreamStore = create<StreamState>((set, get) => ({
     set({ activeThreadId: existing.id })
     return existing.id
   },
-
   setActiveThreadId: (id) => set({ activeThreadId: id }),
-
   loadDmMessages: async (tokenObj, threadId) => {
     try {
       const res = await streamApi.getDmMessages(tokenObj, threadId)
@@ -686,19 +661,16 @@ export const useStreamStore = create<StreamState>((set, get) => ({
     ]
     set({ dmMessages: local })
   },
-
   sendDmMessage: async (tokenObj, data) => {
     try {
       await streamApi.sendDmMessage(tokenObj, data)
     } catch {}
-
     const newMsg = {
       id: 'm_' + Date.now(),
       teks: data.teks,
       isMine: true,
       createdAt: new Date().toISOString()
     }
-
     set((state) => {
       const updatedMessages = [...state.dmMessages, newMsg]
       const updatedThreads = state.dmThreads.map(t => {
@@ -711,9 +683,7 @@ export const useStreamStore = create<StreamState>((set, get) => ({
       return { dmMessages: updatedMessages, dmThreads: updatedThreads }
     })
   },
-
   clearDmThread: () => set({ activeThreadId: null, dmMessages: [] }),
-
   loadNotifs: async (tokenObj) => {
     try {
       const res = await streamApi.getNotifications(tokenObj)
@@ -727,7 +697,6 @@ export const useStreamStore = create<StreamState>((set, get) => ({
       set({ notifs: MOCK_NOTIFS, unreadNotifCount: 2 })
     }
   },
-
   markNotifsRead: async (tokenObj) => {
     try {
       await streamApi.markNotificationsRead(tokenObj)
