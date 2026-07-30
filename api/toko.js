@@ -1,11 +1,5 @@
 // ================================================
-// /api/toko.js — SERVERLESS FUNCTION (jalan di server, BUKAN di browser)
-//
-// REVISI PADA VERSI INI:
-// 1. adminApi.getStats: Mengembalikan breakdown user per plan 
-//    (free, starter, pro, business, expired) dan totalPlatformGmv.
-// 2. adminApi.getSellers: Mengembalikan field 'plan' sebagai string 
-//    dan 'planExpiry' untuk hitung countdown expired di frontend.
+// /api/toko.js — SERVERLESS FUNCTION
 // ================================================
 import { createClient } from '@supabase/supabase-js'
 import { AccessToken } from 'livekit-server-sdk'
@@ -45,7 +39,7 @@ function handleError(error) {
 }
 
 // ================================================
-// TIER VALIDATION HELPERS (4-TIER SYSTEM)
+// TIER VALIDATION HELPERS
 // ================================================
 const TIER_LEVELS = { free: 0, starter: 1, pro: 2, business: 3 }
 
@@ -85,7 +79,7 @@ function requireTermsAccepted(userRow) {
 }
 
 // ================================================
-// FOTO LIMIT HELPER (SATPAM FOTO)
+// FOTO LIMIT HELPER
 // ================================================
 function getFotoLimit(plan) {
   const userPlan = (plan || 'free').toLowerCase()
@@ -182,7 +176,7 @@ async function verifyToken(token) {
 }
 
 // ================================================
-// BARU: ADMIN VERIFICATION
+// ADMIN VERIFICATION
 // ================================================
 async function verifyAdminToken(token) {
   const userId = await verifyToken(token)
@@ -200,7 +194,7 @@ async function verifyAdminToken(token) {
 }
 
 // ================================================
-// BARU: CUSTOMER TOKEN VERIFICATION
+// CUSTOMER TOKEN VERIFICATION
 // ================================================
 async function verifyCustomerToken(token) {
   if (!token) throw new ApiError('Token diperlukan', 401)
@@ -216,7 +210,7 @@ async function verifyCustomerToken(token) {
 }
 
 // ================================================
-// MAPPERS — snake_case DB → camelCase frontend
+// MAPPERS
 // ================================================
 function mapProduk(p) {
   if (!p) return null
@@ -433,7 +427,7 @@ const authApi = {
 }
 
 // ================================================
-// CUSTOMER (buyer per-toko)
+// CUSTOMER
 // ================================================
 const customerApi = {
   loginWithGoogle: async (googleUser, tokoId) => {
@@ -604,7 +598,7 @@ const tokoApi = {
 }
 
 // ================================================
-// PRODUK — DENGAN VALIDASI FOTO LIMIT
+// PRODUK
 // ================================================
 const produkApi = {
   create: async (token, data) => {
@@ -978,7 +972,7 @@ const ratingApi = {
 }
 
 // ================================================
-// ADMIN
+// ADMIN — DENGAN CRUD BLOG/GUIDES/HELP
 // ================================================
 const adminApi = {
   getUsers: async (token) => {
@@ -1002,22 +996,24 @@ const adminApi = {
     })
     return { success: true, data: result }
   },
+
+  // UPDATED: Return breakdown per plan + totalPlatformGmv
   getStats: async (token) => {
     await verifyAdminToken(token)
-    
+
     const { count: totalUser } = await supabaseAdmin.from('users').select('', { count: 'exact', head: true })
     const { count: totalToko } = await supabaseAdmin.from('toko').select('', { count: 'exact', head: true })
     const { count: totalProduk } = await supabaseAdmin.from('produk').select('*', { count: 'exact', head: true })
 
-    // 1. Breakdown per plan & hitung yang expired
+    // Breakdown per plan & hitung yang expired
     const { data: usersByPlan } = await supabaseAdmin.from('users').select('plan, plan_expiry')
     const now = new Date()
     let freeCount = 0, starterCount = 0, proCount = 0, businessCount = 0, expiredCount = 0
-    
+
     ;(usersByPlan || []).forEach(u => {
       const plan = (u.plan || 'free').toLowerCase()
       const isExpired = u.plan_expiry && new Date(u.plan_expiry) < now
-      
+
       if (plan !== 'free' && isExpired) {
         expiredCount++
       } else if (plan === 'free') {
@@ -1031,25 +1027,26 @@ const adminApi = {
       }
     })
 
-    // 2. Total Platform GMV (akumulasi semua pesanan status 'done')
+    // Total Platform GMV
     const { data: doneOrders } = await supabaseAdmin.from('pesanan').select('total').eq('status', 'done')
     const totalPlatformGmv = (doneOrders || []).reduce((sum, p) => sum + Number(p.total || 0), 0)
 
     return {
       success: true,
       data: {
-        totalUser, 
-        totalToko, 
+        totalUser,
+        totalToko,
         totalProduk,
-        freeCount, 
-        starterCount, 
-        proCount, 
-        businessCount, 
+        freeCount,
+        starterCount,
+        proCount,
+        businessCount,
         expiredCount,
         totalPlatformGmv
       }
     }
   },
+
   grantPlan: async (token, targetUserId, targetPlan, months) => {
     await verifyAdminToken(token)
     const validPlans = ['starter', 'pro', 'business']
@@ -1078,6 +1075,7 @@ const adminApi = {
     if (tokoErr) handleError(tokoErr)
     return { success: true, message: `${targetPlan} aktif ${months} bulan` }
   },
+
   grantPro: async (token, targetUserId, months) => {
     await verifyAdminToken(token)
     const expiry = new Date()
@@ -1096,6 +1094,7 @@ const adminApi = {
 
     return { success: true, message: `Pro aktif ${months} bulan` }
   },
+
   revokePro: async (token, targetUserId) => {
     await verifyAdminToken(token)
     const { error: userErr } = await supabaseAdmin
@@ -1111,6 +1110,8 @@ const adminApi = {
 
     return { success: true, message: 'Pro berhasil dicabut' }
   },
+
+  // UPDATED: Return field plan string + planExpiry
   getSellers: async (token) => {
     await verifyAdminToken(token)
     const { data: tokos, error } = await supabaseAdmin
@@ -1123,18 +1124,18 @@ const adminApi = {
     const { data: users } = await supabaseAdmin.from('users').select('id, name, email, plan, plan_expiry')
     const { data: produks } = await supabaseAdmin.from('produk').select('id, toko_id')
     const { data: pesanans } = await supabaseAdmin.from('pesanan').select('id, toko_id, total, status')
-    
+
     const now = new Date()
 
     const result = (tokos || []).map(t => {
       const u = (users || []).find(usr => usr.id === t.user_id)
       const doneOrders = (pesanans || []).filter(p => p.toko_id === t.id && p.status === 'done')
-      
-      // Tentukan plan aktual (jika expired, anggap 'expired')
+
+      // Tentukan plan aktual
       let actualPlan = (u?.plan || t.plan || 'free').toLowerCase()
       const isExpired = u?.plan_expiry && new Date(u.plan_expiry) < now
       if (isExpired && actualPlan !== 'free') {
-        actualPlan = 'expired' 
+        actualPlan = 'expired'
       }
 
       return {
@@ -1143,10 +1144,8 @@ const adminApi = {
         storeName: t.nama,
         slug: t.slug,
         email: u?.email || null,
-        // Field baru untuk UI Admin Panel
-        plan: actualPlan, // 'free', 'starter', 'pro', 'business', 'expired'
+        plan: actualPlan,
         planExpiry: u?.plan_expiry || null,
-        // Field lama (dipertahankan untuk backward-compatibility)
         isPro: actualPlan === 'pro' || actualPlan === 'business',
         status: t.aktif !== false ? 'active' : 'suspended',
         productsCount: (produks || []).filter(p => p.toko_id === t.id).length,
@@ -1154,9 +1153,10 @@ const adminApi = {
         joined: new Date(t.created_at || Date.now()).toISOString().slice(0, 10),
       }
     })
-    
+
     return { success: true, data: result }
   },
+
   getSystemLogs: async (token) => {
     await verifyAdminToken(token)
     return {
@@ -1166,6 +1166,7 @@ const adminApi = {
       ]
     }
   },
+
   toggleProStatus: async (token, sellerId) => {
     await verifyAdminToken(token)
     const { data: toko } = await supabaseAdmin.from('toko').select('id, user_id, plan').eq('id', sellerId).single()
@@ -1180,6 +1181,7 @@ const adminApi = {
 
     return { success: true, data: { isPro: newPlan === 'pro' } }
   },
+
   toggleStoreStatus: async (token, sellerId) => {
     await verifyAdminToken(token)
     const { data: toko } = await supabaseAdmin.from('toko').select('id, aktif').eq('id', sellerId).single()
@@ -1191,6 +1193,7 @@ const adminApi = {
 
     return { success: true, data: { aktif: newAktif } }
   },
+
   deleteUser: async (token, targetUserId) => {
     await verifyAdminToken(token)
     const { data: toko } = await supabaseAdmin.from('toko').select('id').eq('user_id', targetUserId).single()
@@ -1209,6 +1212,129 @@ const adminApi = {
     if (error) handleError(error)
 
     return { success: true, message: 'User berhasil dihapus' }
+  },
+
+  // === BLOG CRUD ===
+  createBlogPost: async (token, data) => {
+    await verifyAdminToken(token)
+    const { data: post, error } = await supabaseAdmin
+      .from('blog_posts')
+      .insert({
+        title: data.title,
+        slug: data.slug,
+        excerpt: data.excerpt || '',
+        content: data.content,
+        cover_image: data.cover_image || null,
+        category: data.category || 'Tips',
+        published_at: data.published_at || new Date().toISOString(),
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .select()
+      .single()
+    if (error) handleError(error)
+    return { success: true, data: post }
+  },
+
+  updateBlogPost: async (token, postId, data) => {
+    await verifyAdminToken(token)
+    const { error } = await supabaseAdmin
+      .from('blog_posts')
+      .update({
+        ...data,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', postId)
+    if (error) handleError(error)
+    return { success: true }
+  },
+
+  deleteBlogPost: async (token, postId) => {
+    await verifyAdminToken(token)
+    const { error } = await supabaseAdmin.from('blog_posts').delete().eq('id', postId)
+    if (error) handleError(error)
+    return { success: true }
+  },
+
+  // === GUIDES CRUD ===
+  createGuide: async (token, data) => {
+    await verifyAdminToken(token)
+    const { data: guide, error } = await supabaseAdmin
+      .from('guides')
+      .insert({
+        title: data.title,
+        slug: data.slug,
+        summary: data.summary || '',
+        content: data.content,
+        icon: data.icon || 'BookOpen',
+        published_at: data.published_at || new Date().toISOString(),
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .select()
+      .single()
+    if (error) handleError(error)
+    return { success: true, data: guide }
+  },
+
+  updateGuide: async (token, guideId, data) => {
+    await verifyAdminToken(token)
+    const { error } = await supabaseAdmin
+      .from('guides')
+      .update({
+        ...data,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', guideId)
+    if (error) handleError(error)
+    return { success: true }
+  },
+
+  deleteGuide: async (token, guideId) => {
+    await verifyAdminToken(token)
+    const { error } = await supabaseAdmin.from('guides').delete().eq('id', guideId)
+    if (error) handleError(error)
+    return { success: true }
+  },
+
+  // === HELP ARTICLES CRUD ===
+  createHelpArticle: async (token, data) => {
+    await verifyAdminToken(token)
+    const { data: article, error } = await supabaseAdmin
+      .from('help_articles')
+      .insert({
+        title: data.title,
+        slug: data.slug,
+        content: data.content,
+        category: data.category || 'FAQ',
+        published_at: data.published_at || new Date().toISOString(),
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .select()
+      .single()
+    if (error) handleError(error)
+    return { success: true, data: article }
+  },
+
+  updateHelpArticle: async (token, articleId, data) => {
+    await verifyAdminToken(token)
+    const { error } = await supabaseAdmin
+      .from('help_articles')
+      .update({
+        ...data,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', articleId)
+    if (error) handleError(error)
+    return { success: true }
+  },
+
+  deleteHelpArticle: async (token, articleId) => {
+    await verifyAdminToken(token)
+    const { error } = await supabaseAdmin.from('help_articles').delete().eq('id', articleId)
+    if (error) handleError(error)
+    return { success: true }
   },
 }
 
